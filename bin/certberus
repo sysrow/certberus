@@ -234,10 +234,18 @@ auto_discover_or_die() {
     fi
 
     if (( ${#discovered[@]} == 0 )); then
-        cb_error "Zadna domena nenalezena, ktera by mirila na tento server."
-        cb_log "Overte:"
-        cb_log "  - DNS A/AAAA zaznamy domen miri na $(cb_server_ipv4 2>/dev/null || echo '?')"
-        cb_log "  - Webserver konfigurace obsahuje ServerName/server_name/Host name"
+        local _ip; _ip="$(cb_server_ipv4 2>/dev/null || echo '?')"
+        local _host; _host="$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo 'mydomain.example')"
+        cb_error "No domain found pointing to this server."
+        cb_log "Verify:"
+        cb_log "  - DNS A/AAAA records for your domains point to $_ip"
+        cb_log "  - Webserver (apache/nginx) has a VirtualHost with ServerName configured"
+        cb_log ""
+        cb_log "Or specify a domain manually:"
+        cb_log "  certberus auto --email <your@email> --domain $_host"
+        cb_log "  certberus auto --email <your@email> --domain a.example --domain b.example"
+        cb_log ""
+        cb_log "Tip: 'certberus interactive' walks you through the setup (creates config.env)."
         exit 2
     fi
 
@@ -536,7 +544,14 @@ cmd_auto() {
     local email="${CLI_EMAIL:-${CB_EMAIL:-}}"
     if [[ -z "$email" || "$email" == "admin@example.com" ]]; then
         cb_error "Missing valid email for CA."
-        cb_log "  Vypln CB_EMAIL v $CB_CONFIG_FILE nebo pouzij --email."
+        if [[ -f "$CB_CONFIG_FILE" ]]; then
+            cb_log "  Set CB_EMAIL in $CB_CONFIG_FILE or use --email."
+        else
+            cb_log "  ($CB_CONFIG_FILE does not exist — probably running from .bundle.)"
+            cb_log "  Use --email, for example:"
+            cb_log "    certberus auto --email admin@example.com --domain $(hostname -f 2>/dev/null || hostname 2>/dev/null || echo example.com)"
+            cb_log "  Or create $CB_CONFIG_FILE (see 'certberus interactive')."
+        fi
         exit 2
     fi
 
