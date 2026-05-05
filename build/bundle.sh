@@ -127,6 +127,7 @@ source "$CB_LIB_DIR/firewall.sh"
 source "$CB_LIB_DIR/hooks.sh"
 source "$CB_LIB_DIR/discover.sh"
 cb_load_config
+cb_ensure_runtime_dirs
 
 BOOTSTRAP
 

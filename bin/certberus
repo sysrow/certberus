@@ -43,6 +43,7 @@ source "$CB_LIB_DIR/hooks.sh"
 # shellcheck disable=SC1091
 source "$CB_LIB_DIR/discover.sh"
 cb_load_config
+cb_ensure_runtime_dirs
 
 usage() {
     cat <<EOF
@@ -579,6 +580,16 @@ cmd_auto() {
                 exit 2; }
             ;;
     esac
+
+    # Persist skeleton config.env (if missing and we have email — typical for bundle).
+    # Idempotent: never overwrites existing file.
+    if [[ ! -f "$CB_CONFIG_FILE" ]]; then
+        local _persist_domains="${CLI_DOMAINS:-${CB_DOMAINS:-}}"
+        # trim wrapping whitespace (CLI_DOMAINS accumulates leading space via "$x $y")
+        _persist_domains="${_persist_domains#"${_persist_domains%%[![:space:]]*}"}"
+        _persist_domains="${_persist_domains%"${_persist_domains##*[![:space:]]}"}"
+        cb_persist_config_skeleton "$email" "$_persist_domains" "$ca"
+    fi
 
     cmd_issue "$@"
 }

@@ -38,6 +38,133 @@ That's it. Everything else is operational tooling (`status`, `doctor`, `expiry`,
 
 ---
 
+## Examples
+
+The two main commands work out of the box on a freshly installed webserver — bundle or .deb,
+both bootstrap `/etc/certberus/` on first run.
+
+### Apache + Let's Encrypt, single domain
+
+```bash
+# Bundle (one-shot, no install):
+curl -fsSLo /usr/local/sbin/certberus \
+  https://github.com/Tristram1337/certberus/releases/latest/download/certberus-0.1.3.bundle
+chmod +x /usr/local/sbin/certberus
+
+sudo certberus auto --email admin@example.com --domain www.example.com
+# Cert appears in /var/lib/apache2/md/md/store/domains/www.example.com/ (10-60s, async).
+sudo certberus cert-info www.example.com
+```
+
+The first `auto` run also writes `/etc/certberus/config.env` for you, so cron can call
+`certberus auto` with no flags afterwards.
+
+### Test in staging first (no rate limits, untrusted certs)
+
+```bash
+sudo certberus auto --staging --email admin@example.com --domain www.example.com
+sudo certberus cert-info www.example.com   # issuer = "STAGING - ..."
+sudo certberus auto --email admin@example.com --domain www.example.com   # production
+```
+
+### Multiple domains (SAN cert)
+
+```bash
+sudo certberus auto --email admin@example.com \
+  --domain www.example.com --domain api.example.com --domain example.com
+```
+
+### Auto-discover domains from existing webserver config
+
+```bash
+sudo certberus auto --email admin@example.com
+# Reads ServerName/server_name/Host name from Apache, nginx and Tomcat
+# and includes only domains whose DNS A/AAAA points at this server.
+sudo certberus discover     # preview without issuing
+```
+
+### nginx + Let's Encrypt
+
+```bash
+sudo certberus auto --webserver nginx --email admin@example.com --domain www.example.com
+```
+
+### Tomcat 9+ with certbot (port 80 needs a strategy)
+
+```bash
+# webroot via existing reverse proxy (nginx/Apache in front):
+sudo certberus auto --webserver tomcat --port80 webroot --webroot /var/www/html \
+  --email admin@example.com --domain api.example.com
+
+# or temporarily open port 80 directly to Tomcat:
+sudo certberus auto --webserver tomcat --port80 iptables \
+  --email admin@example.com --domain api.example.com
+```
+
+### HARICA / CESNET TCS (EAB)
+
+```bash
+sudo certberus auto \
+  --ca harica \
+  --email admin@example.com \
+  --eab-kid YOUR_KID \
+  --eab-hmac YOUR_HMAC_BASE64 \
+  --acme-url 'https://acme.harica.gr/<ALIAS>/directory' \
+  --domain www.example.com
+```
+
+(Or fill the same `CB_EAB_KID`, `CB_EAB_HMAC`, `CB_ACME_URL` in `/etc/certberus/config.env`
+and just run `sudo certberus auto`.)
+
+### ZeroSSL
+
+```bash
+sudo certberus auto --ca zerossl --email admin@example.com \
+  --eab-kid YOUR_KID --eab-hmac YOUR_HMAC --domain www.example.com
+```
+
+### Cron renewal (after first successful auto)
+
+```bash
+echo '0 3 * * * root /usr/local/sbin/certberus auto >>/var/log/certberus/cron.log 2>&1' \
+  | sudo tee /etc/cron.d/certberus
+```
+
+For Apache mod_md no cron is needed — Apache itself handles renewal asynchronously.
+The cron above is a belt-and-suspenders idempotent re-run.
+
+### Diagnostics
+
+```bash
+sudo certberus doctor                        # OS / firewall / ports / modules / versions
+sudo certberus test-domain www.example.com   # DNS + CAA + port 80 + cert per single domain
+sudo certberus discover                      # what domains point here
+sudo certberus cert-info                     # all known certs (mod_md, certbot, live HTTPS)
+sudo certberus expiry                        # expiry table
+sudo certberus status                        # high-level overview
+```
+
+### Dry-run (simulate, no changes)
+
+```bash
+sudo certberus auto --dry-run --email admin@example.com --domain www.example.com
+```
+
+### Rollback after a bad change
+
+```bash
+sudo certberus rollback   # restores the last snapshot of /etc/apache2 (or /etc/nginx, /etc/tomcat*)
+```
+
+### Behind NAT / load balancer / floating IP
+
+```bash
+# Local interface IP differs from public DNS A record:
+sudo certberus auto --email admin@example.com --domain www.example.com --skip-dns-check
+```
+
+---
+
 ## Install
 
 You have two options.
@@ -241,4 +368,4 @@ for f in bin/certberus lib/*.sh webservers/*.sh; do bash -n "$f" && echo "OK: $f
 
 ## License
 
-See `LICENSE`.
+MIT — see [LICENSE](LICENSE).
