@@ -66,7 +66,7 @@ HEADER
     echo
 
     # Library payloads (order matters: load common.sh first)
-    LIB_FILES=(common.sh os.sh dns.sh firewall.sh hooks.sh discover.sh preflight.sh)
+    LIB_FILES=(common.sh os.sh dns.sh firewall.sh hooks.sh discover.sh preflight.sh scan.sh)
     for f in "${LIB_FILES[@]}"; do
         [[ -f "$SRC_LIB/$f" ]] || { echo "Missing $SRC_LIB/$f" >&2; exit 2; }
         label="LIB_$(echo "$f" | tr 'a-z.-' 'A-Z__')"
@@ -103,6 +103,7 @@ __cb_payload_LIB_FIREWALL_SH  > "$CB_BUNDLE_TMP/lib/firewall.sh"
 __cb_payload_LIB_HOOKS_SH     > "$CB_BUNDLE_TMP/lib/hooks.sh"
 __cb_payload_LIB_DISCOVER_SH  > "$CB_BUNDLE_TMP/lib/discover.sh"
 __cb_payload_LIB_PREFLIGHT_SH > "$CB_BUNDLE_TMP/lib/preflight.sh"
+__cb_payload_LIB_SCAN_SH      > "$CB_BUNDLE_TMP/lib/scan.sh"
 
 # Webserver scripts (executable: spawned as subprocesses by the orchestrator)
 __cb_payload_WS_APACHE_MD_SH      > "$CB_BUNDLE_TMP/webservers/apache-md.sh"
@@ -126,6 +127,7 @@ source "$CB_LIB_DIR/dns.sh"
 source "$CB_LIB_DIR/firewall.sh"
 source "$CB_LIB_DIR/hooks.sh"
 source "$CB_LIB_DIR/discover.sh"
+source "$CB_LIB_DIR/scan.sh"
 cb_load_config
 cb_ensure_runtime_dirs
 

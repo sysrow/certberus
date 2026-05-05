@@ -10,7 +10,7 @@
 #
 set -uo pipefail
 
-CB_VERSION="0.1.0"
+CB_VERSION="0.1.6"
 
 # Locate libraries - dev mode (repo) or installed mode
 _SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -42,6 +42,8 @@ source "$CB_LIB_DIR/firewall.sh"
 source "$CB_LIB_DIR/hooks.sh"
 # shellcheck disable=SC1091
 source "$CB_LIB_DIR/discover.sh"
+# shellcheck disable=SC1091
+source "$CB_LIB_DIR/scan.sh"
 cb_load_config
 cb_ensure_runtime_dirs
 
@@ -73,6 +75,7 @@ Usage: certberus [GLOBAL] COMMAND [ARGS]
   discover      Zobraz domeny ktere miri na tento server
   test-domain D Preflight (DNS+CAA+port 80+cert) pro jednu domenu
   cert-info [D] Stav certu pro domenu (mod_md store, certbot, live HTTPS)
+  scan          Inventura X.509 na stroji (FS + configy + listenery)
   renew         Vynutit obnovu (synonym pro auto/issue, idempotentni)
   revoke D      Revokovat cert pro domenu
   rollback      Vratit posledni snapshot
@@ -177,7 +180,14 @@ parse_global() {
             -V|--version) echo "certberus $CB_VERSION"; exit 0 ;;
             -h|--help) CB_CMD="help" ;;
             --) shift; REMAINING+=("$@"); return 0 ;;
-            -*) cb_warn "Neznamy flag: $1" ;;
+            -*)
+                # After CB_CMD is set, unknown flags are subcommand flags (cmd_scan etc.)
+                if [[ -n "$CB_CMD" ]]; then
+                    REMAINING+=("$1")
+                else
+                    cb_warn "Unknown flag: $1"
+                fi
+                ;;
             *)
                 if [[ -z "$CB_CMD" ]]; then
                     CB_CMD="$1"
@@ -790,6 +800,12 @@ cmd_cert_info() {
     fi
 }
 
+# certberus scan [--format table|json|tsv] [--no-fs|--no-config|--no-listen]
+# X.509 inventory on the machine — dispatch to lib/scan.sh.
+cmd_scan() {
+    cb_scan "$@"
+}
+
 cmd_doctor() {
     cb_banner "Certberus — diagnostics"
     cb_log "OS: $CB_OS_ID $CB_OS_VERSION (pkg: $CB_PKG_MGR)"
@@ -953,6 +969,7 @@ case "$CMD" in
     discover)    cmd_discover "$@" ;;
     test-domain|test) cmd_test_domain "$@" ;;
     cert-info|cert)   cmd_cert_info "$@" ;;
+    scan|inventory)   cmd_scan "${REMAINING[@]:1}" ;;
     expiry|expires) cmd_expiry "$@" ;;
     revoke)      cmd_revoke "$@" ;;
     rollback)    cmd_rollback "$@" ;;

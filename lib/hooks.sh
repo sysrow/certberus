@@ -53,20 +53,10 @@ cb_run_hooks() {
     local have_timeout=0
     command -v timeout >/dev/null 2>&1 && have_timeout=1
 
-    if command -v run-parts >/dev/null 2>&1; then
-        # Debian run-parts; regex vylouci .example/.bak/.dpkg-*
-        # run-parts samo nema timeout; obalime ho, abychom dodrzeli CB_HOOK_TIMEOUT (*na cely event*).
-        local rp_args=(--regex '^[0-9a-zA-Z][0-9a-zA-Z._-]*[0-9a-zA-Z]$' "$dir")
-        [[ "$CB_VERBOSE" == "1" ]] && rp_args=(--verbose "${rp_args[@]}")
-        if (( have_timeout )); then
-            timeout "$to" run-parts "${rp_args[@]}"; rc=$?
-        else
-            run-parts "${rp_args[@]}"; rc=$?
-        fi
-        if (( rc != 0 )); then
-            (( rc == 124 )) && cb_error "Hook event '$event' timeout (>${to}s)"
-            failed=1
-        fi
+    if false; then
+        # (run-parts cesta vyrazena - regex umoznoval .example/.bak; ponechano jen
+        # pro historickou referenci, viz git blame)
+        :
     else
         # Manualni fallback (RHEL apod.) - timeout per-hook
         local prev_nullglob
