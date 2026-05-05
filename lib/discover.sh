@@ -63,6 +63,71 @@ cb_discover_apache_domains() {
     ' | grep -vE '^\*|^_default_|^$' | sort -u
 }
 
+# -------- Apache mod_md (MDStoreDir + MDomain v configu) --------
+# Independent of -S, because MDomain pages have no ServerName and apachectl -S
+# then hides them. Collection from two sources:
+#   1) MDomain directive in /etc/apache2/**/*.conf (including conf-available, sites-*)
+#   2) Directory names in <MDStoreDir>/{domains,staging}/<domain>/
+cb_discover_mod_md_domains() {
+    # Configs: can override via CB_DISCOVER_APACHE_DIRS (space-separated paths)
+    local conf_dirs
+    if [[ -n "${CB_DISCOVER_APACHE_DIRS:-}" ]]; then
+        # shellcheck disable=SC2206
+        conf_dirs=($CB_DISCOVER_APACHE_DIRS)
+    else
+        conf_dirs=(/etc/apache2 /etc/httpd)
+    fi
+    local d f line
+    for d in "${conf_dirs[@]}"; do
+        [[ -d "$d" ]] || continue
+        # MDomain example.com [www.example.com ...]   nebo
+        # <MDomain example.com>
+        grep -rhoE '^[[:space:]]*<?MDomain(Set)?[[:space:]]+[^>]+' "$d" 2>/dev/null \
+          | sed -E 's/^[[:space:]]*<?MDomain(Set)?[[:space:]]+//; s/>.*$//' \
+          | tr ' \t' '\n' \
+          | grep -vE '^[[:space:]]*$|^auto$|^manual$' || true
+    done
+
+    # mod_md store on disk - can override via CB_DISCOVER_MD_STORES
+    local store_dirs
+    if [[ -n "${CB_DISCOVER_MD_STORES:-}" ]]; then
+        # shellcheck disable=SC2206
+        store_dirs=($CB_DISCOVER_MD_STORES)
+    else
+        store_dirs=(
+            /etc/apache2/md
+            /var/lib/apache2/md
+            /var/cache/apache2/md
+            /etc/httpd/md
+            /var/lib/httpd/md
+        )
+    fi
+    for d in "${store_dirs[@]}"; do
+        for sub in domains staging; do
+            [[ -d "$d/$sub" ]] || continue
+            # Safe: only direct subdirectory name (name is the domain)
+            for entry in "$d/$sub"/*/; do
+                [[ -d "$entry" ]] || continue
+                name="${entry%/}"; name="${name##*/}"
+                # md.json is the authoritative source of names (MDomain with aliases)
+                if [[ -r "$entry/md.json" ]] && command -v python3 >/dev/null 2>&1; then
+                    python3 - "$entry/md.json" <<'PY' 2>/dev/null
+import json, sys
+try:
+    j = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for n in j.get('domains', []) or []:
+    if n: print(n)
+PY
+                else
+                    [[ "$name" == *.* ]] && printf '%s\n' "$name"
+                fi
+            done
+        done
+    done | sort -u
+}
+
 # -------- nginx server_name --------
 cb_discover_nginx_domains() {
     command -v nginx >/dev/null 2>&1 || return 0
@@ -105,11 +170,12 @@ PY
 cb_discover_webserver_domains() {
     local ws="${1:-auto}"
     case "$ws" in
-        apache) cb_discover_apache_domains ;;
+        apache) { cb_discover_apache_domains; cb_discover_mod_md_domains; } | sort -u ;;
         nginx)  cb_discover_nginx_domains ;;
         tomcat) cb_discover_tomcat_domains ;;
         auto|*)
             { cb_discover_apache_domains
+              cb_discover_mod_md_domains
               cb_discover_nginx_domains
               cb_discover_tomcat_domains
             } | sort -u
@@ -142,20 +208,24 @@ cb_filter_points_here() {
 #   CB_DISC_SKIPPED_NO_RESOLVE - domains that appeared but do not resolve to us (CSV)
 cb_discover_all() {
     local ws="${1:-auto}"
-    local -a all=() from_cb from_https from_ws
+    local -a all=() from_cb from_https from_ws from_mdmd
 
     # 1) Certbot
     mapfile -t from_cb < <(cb_discover_certbot_domains)
     CB_DISC_FROM_CERTBOT=${#from_cb[@]}
 
-    # 2) Webserver config
+    # 2a) mod_md store + MDomain (separate, so we can report the source)
+    mapfile -t from_mdmd < <(cb_discover_mod_md_domains)
+    CB_DISC_FROM_MOD_MD=${#from_mdmd[@]}
+
+    # 2b) Webserver config (apache vhost + nginx + tomcat - mod_md already collected)
     mapfile -t from_ws < <(cb_discover_webserver_domains "$ws")
     CB_DISC_FROM_WEBSERVER=${#from_ws[@]}
 
-    # 3) HTTPS dotaz (jen pokud bezi lokalne nejaky webserver)
+    # 3) HTTPS query (only if a webserver is running locally)
     from_https=()
     if command -v ss >/dev/null 2>&1 && ss -tln 2>/dev/null | grep -qE ':443\s'; then
-        # kontaktujeme localhost s nekolika SNI pokusy
+        # contact localhost with several SNI attempts
         local h
         for h in "${from_ws[@]}" localhost; do
             local san
@@ -168,7 +238,7 @@ cb_discover_all() {
     CB_DISC_FROM_HTTPS=${#from_https[@]}
 
     # Union + unique
-    all=("${from_cb[@]}" "${from_ws[@]}" "${from_https[@]}")
+    all=("${from_cb[@]}" "${from_mdmd[@]}" "${from_ws[@]}" "${from_https[@]}")
     local -a uniq=()
     if (( ${#all[@]} > 0 )); then
         mapfile -t uniq < <(printf '%s\n' "${all[@]}" | sort -u | grep -vE '^\s*$')
@@ -193,6 +263,7 @@ cb_discover_all() {
     : "${CB_DISC_STATE_FILE:=${TMPDIR:-/tmp}/certberus-disc-$$.env}"
     {
         echo "CB_DISC_FROM_CERTBOT=${CB_DISC_FROM_CERTBOT}"
+        echo "CB_DISC_FROM_MOD_MD=${CB_DISC_FROM_MOD_MD:-0}"
         echo "CB_DISC_FROM_WEBSERVER=${CB_DISC_FROM_WEBSERVER}"
         echo "CB_DISC_FROM_HTTPS=${CB_DISC_FROM_HTTPS}"
         printf 'CB_DISC_SKIPPED_NO_RESOLVE=%q\n' "$CB_DISC_SKIPPED_NO_RESOLVE"

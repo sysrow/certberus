@@ -10,7 +10,7 @@
 #
 set -uo pipefail
 
-CB_VERSION="0.1.6"
+CB_VERSION="0.1.7"
 
 # Locate libraries - dev mode (repo) or installed mode
 _SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -251,26 +251,26 @@ auto_discover_or_die() {
 
     cb_log "Zdroje:  certbot=${CB_DISC_FROM_CERTBOT:-0}  webserver=${CB_DISC_FROM_WEBSERVER:-0}  https=${CB_DISC_FROM_HTTPS:-0}"
     if [[ -n "${CB_DISC_SKIPPED_NO_RESOLVE:-}" ]]; then
-        cb_warn "Skipped (not pointing here): $CB_DISC_SKIPPED_NO_RESOLVE"
+        cb_warn "Preskoceno (nemiri na nas): $CB_DISC_SKIPPED_NO_RESOLVE"
     fi
 
     if (( ${#discovered[@]} == 0 )); then
         local _ip; _ip="$(cb_server_ipv4 2>/dev/null || echo '?')"
-        local _host; _host="$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo 'mydomain.example')"
-        cb_error "No domain found pointing to this server."
-        cb_log "Verify:"
-        cb_log "  - DNS A/AAAA records for your domains point to $_ip"
-        cb_log "  - Webserver (apache/nginx) has a VirtualHost with ServerName configured"
+        local _host; _host="$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo 'mojedomena.example')"
+        cb_error "Zadna domena nenalezena, ktera by mirila na tento server."
+        cb_log "Overte:"
+        cb_log "  - DNS A/AAAA zaznamy domen miri na $_ip"
+        cb_log "  - Webserver (apache/nginx) ma nakonfigurovany VirtualHost se ServerName"
         cb_log ""
-        cb_log "Or specify a domain manually:"
-        cb_log "  certberus auto --email <your@email> --domain $_host"
-        cb_log "  certberus auto --email <your@email> --domain a.example --domain b.example"
+        cb_log "Nebo zadejte domenu rucne:"
+        cb_log "  certberus auto --email <vas@email> --domain $_host"
+        cb_log "  certberus auto --email <vas@email> --domain a.example --domain b.example"
         cb_log ""
-        cb_log "Tip: 'certberus interactive' walks you through the setup (creates config.env)."
+        cb_log "Tip: 'certberus interactive' provede pruvodcem (vytvori i config.env)."
         exit 2
     fi
 
-    cb_ok "Found ${#discovered[@]} domains pointing to this server:"
+    cb_ok "Nalezeno ${#discovered[@]} domen, ktere miri na tento server:"
     local d
     for d in "${discovered[@]}"; do cb_log "  - $d"; done
 
@@ -278,8 +278,8 @@ auto_discover_or_die() {
     if [[ "$CLI_FORCE" == "1" || "$CB_ASSUME_YES" == "1" ]]; then
         cb_log "(--force / -y: bez potvrzeni)"
     else
-        if ! cb_ask_yn "Continue with these domains?" "Y/n"; then
-            cb_log "Cancelled by user."
+        if ! cb_ask_yn "Pokracovat s temito domenami?" "Y/n"; then
+            cb_log "Zruseno uzivatelem."
             exit 0
         fi
     fi
@@ -303,10 +303,14 @@ cmd_discover() {
     local -a discovered=()
     mapfile -t discovered < <(cb_discover_all "$ws")
     cb_discover_load_stats
-    cb_log "Zdroje:  certbot=${CB_DISC_FROM_CERTBOT:-0}  webserver=${CB_DISC_FROM_WEBSERVER:-0}  https=${CB_DISC_FROM_HTTPS:-0}"
+    cb_log "Sources:  certbot=${CB_DISC_FROM_CERTBOT:-0}  mod_md=${CB_DISC_FROM_MOD_MD:-0}  webserver=${CB_DISC_FROM_WEBSERVER:-0}  https=${CB_DISC_FROM_HTTPS:-0}"
     cb_sep
     if (( ${#discovered[@]} == 0 )); then
-        cb_warn "Nenalezeno zadnych domen mirich sem."
+        cb_warn "Zadna domena nesmeruje DNS A/AAAA na tento server."
+        cb_log "  Tipy:"
+        cb_log "    - zkontroluj 'apache2ctl -S' / 'nginx -T' (jsou tam ServerName?)"
+        cb_log "    - zkontroluj 'ls /etc/apache2/md/{domains,staging}/' (mod_md store)"
+        cb_log "    - DNS zaznam musi A/AAAA mirit na tento stroj (test: certberus test-domain DOMENA)"
     else
         cb_ok "Candidates for certificate issuance:"
         local d
@@ -314,7 +318,7 @@ cmd_discover() {
     fi
     if [[ -n "${CB_DISC_SKIPPED_NO_RESOLVE:-}" ]]; then
         cb_sep
-        cb_warn "Nalezene ale NEMIRI sem (prepojeno jinam / wildcard / nenaresolvi):"
+        cb_warn "Found, but NOT pointing here (DNS points elsewhere / wildcard / unresolvable):"
         echo "$CB_DISC_SKIPPED_NO_RESOLVE" | tr ',' '\n' | sed 's/^/  /'
     fi
 }

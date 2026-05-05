@@ -48,7 +48,7 @@ both bootstrap `/etc/certberus/` on first run.
 ```bash
 # Bundle (one-shot, no install):
 curl -fsSLo /usr/local/sbin/certberus \
-  https://github.com/Tristram1337/certberus/releases/latest/download/certberus-0.1.3.bundle
+  https://github.com/Tristram1337/certberus/releases/latest/download/certberus-0.1.6.bundle
 chmod +x /usr/local/sbin/certberus
 
 sudo certberus auto --email admin@example.com --domain www.example.com
@@ -103,6 +103,8 @@ sudo certberus auto --webserver tomcat --port80 iptables \
 
 ### HARICA / CESNET TCS (EAB)
 
+One-time:
+
 ```bash
 sudo certberus auto \
   --ca harica \
@@ -113,8 +115,27 @@ sudo certberus auto \
   --domain www.example.com
 ```
 
-(Or fill the same `CB_EAB_KID`, `CB_EAB_HMAC`, `CB_ACME_URL` in `/etc/certberus/config.env`
-and just run `sudo certberus auto`.)
+The values are persisted to `/etc/certberus/config.env` on the first successful run, so
+subsequent renewals can simply call `sudo certberus auto`. To set them up-front without
+running a wizard:
+
+```bash
+sudo install -d -m 750 /etc/certberus
+sudo tee /etc/certberus/config.env >/dev/null <<'EOF'
+CB_CA=harica
+CB_EMAIL=admin@example.com
+CB_EAB_KID=YOUR_KID
+CB_EAB_HMAC=YOUR_HMAC_BASE64
+CB_ACME_URL=https://acme.harica.gr/<ALIAS>/directory
+CB_DOMAINS="www.example.com api.example.com"
+EOF
+sudo chmod 640 /etc/certberus/config.env
+sudo certberus auto
+```
+
+Apache mod_md picks up these credentials via the generated
+`/etc/apache2/conf-available/certberus-md.conf` (MDExternalAccountBinding).
+For nginx/tomcat the credentials are forwarded into certbot.
 
 ### ZeroSSL
 
@@ -123,23 +144,51 @@ sudo certberus auto --ca zerossl --email admin@example.com \
   --eab-kid YOUR_KID --eab-hmac YOUR_HMAC --domain www.example.com
 ```
 
-### Cron renewal (after first successful auto)
+### Renewal
+
+**You usually do not need cron.**
+
+* **Apache mod_md** renews fully on its own. Certberus installs an `MDMessageCMD`
+  adapter (`/opt/certberus/mod_md-adapter.sh`) which:
+  * runs `/etc/certberus/hooks/{renewing,renewed,installed,errored,...}.d/*` on each
+    lifecycle event (`man run-parts` semantics),
+  * calls `apache2ctl graceful` on `renewed`/`installed` so a fresh cert is picked up
+    without manual intervention (sudoers rule is installed automatically).
+* **certbot (nginx / tomcat)** ships its own `certbot.timer` / `/etc/cron.d/certbot`
+  on Debian/RHEL. Certberus does not need to duplicate it.
+
+If you still want a belt-and-suspenders periodic re-run (e.g. for HARICA EAB rotation):
 
 ```bash
 echo '0 3 * * * root /usr/local/sbin/certberus auto >>/var/log/certberus/cron.log 2>&1' \
   | sudo tee /etc/cron.d/certberus
 ```
 
-For Apache mod_md no cron is needed — Apache itself handles renewal asynchronously.
-The cron above is a belt-and-suspenders idempotent re-run.
+This is fully idempotent (no-op if no domain is up for renewal).
+
+### Inventory existing certs (where the heck is everything?)
+
+```bash
+sudo certberus scan
+# table view (default): FS files + webserver config refs + active TLS listeners
+sudo certberus scan --format json    # JSONL, machine-readable
+sudo certberus scan --format tsv     # tab-separated, grep/awk-friendly
+sudo certberus scan --no-listen      # skip openssl s_client probes
+```
+
+Covers Apache / nginx / Tomcat (server.xml + JKS) / haproxy / postfix / dovecot /
+openvpn / mysql / postgres / openldap / bind / powerdns / proftpd / vsftpd, plus
+WebLogic / JBoss / WildFly / Oracle paths. Detects PEM, DER, PKCS#12 and JKS,
+warns on password-protected blobs.
 
 ### Diagnostics
 
 ```bash
 sudo certberus doctor                        # OS / firewall / ports / modules / versions
 sudo certberus test-domain www.example.com   # DNS + CAA + port 80 + cert per single domain
-sudo certberus discover                      # what domains point here
+sudo certberus discover                      # what domains point here (incl. mod_md store)
 sudo certberus cert-info                     # all known certs (mod_md, certbot, live HTTPS)
+sudo certberus scan                          # full X.509 inventory (FS + configs + listeners)
 sudo certberus expiry                        # expiry table
 sudo certberus status                        # high-level overview
 ```
@@ -190,7 +239,7 @@ Pre-built binary is attached to every GitHub Release:
 ```bash
 # Latest release
 curl -fsSLo certberus \
-  https://github.com/Tristram1337/certberus/releases/latest/download/certberus-0.1.0.bundle
+  https://github.com/Tristram1337/certberus/releases/latest/download/certberus-0.1.6.bundle
 chmod +x certberus
 sudo install -m 0755 certberus /usr/local/sbin/certberus
 

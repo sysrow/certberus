@@ -121,6 +121,27 @@ echo "$OUT" | grep -qFx "example.com" && _pass "contains example.com" || _fail "
 echo "$OUT" | grep -qFx "www.example.com" && _pass "contains www.example.com" || _fail "missing alias"
 echo "$OUT" | grep -qFx "elsewhere.com" && _pass "contains elsewhere.com" || _fail "missing"
 
+echo "=== Test 2b: cb_discover_mod_md_domains (MDomain + md store) ==="
+# Sandbox apache + mod_md store; fill CB_MD_TEST_ROOTS into our own dir
+MD_SANDBOX="$MOCK/md-sandbox"
+mkdir -p "$MD_SANDBOX/etc/apache2" "$MD_SANDBOX/store/domains/md.example.com" \
+         "$MD_SANDBOX/store/staging/staging.example.com"
+cat > "$MD_SANDBOX/etc/apache2/certberus-md.conf" <<EOF
+MDomain configured.example.com alias.example.com
+EOF
+cat > "$MD_SANDBOX/store/domains/md.example.com/md.json" <<EOF
+{"name":"md.example.com","domains":["md.example.com","www.md.example.com"]}
+EOF
+# Patch the function: redirect paths to our sandbox.
+# Instead of patching we use env-overridable paths via CB_DISCOVER_APACHE_DIRS /
+# CB_DISCOVER_MD_STORES, which discover.sh picks up (see below).
+CB_DISCOVER_APACHE_DIRS="$MD_SANDBOX/etc/apache2" \
+CB_DISCOVER_MD_STORES="$MD_SANDBOX/store" \
+    OUT=$(cb_discover_mod_md_domains | sort | tr '\n' ' ')
+echo "$OUT" | grep -q 'md.example.com'        && _pass "md.example.com from md.json" || _fail "expected md.example.com, got='$OUT'"
+echo "$OUT" | grep -q 'staging.example.com'   && _pass "staging.example.com from dir name" || _fail "expected staging.example.com, got='$OUT'"
+echo "$OUT" | grep -q 'configured.example.com' && _pass "configured.example.com from MDomain" || _fail "expected configured.example.com, got='$OUT'"
+
 echo "=== Test 3: cb_server_ipv4 (from mock curl) ==="
 CB_SERVER_IP4=""
 IP=$(cb_server_ipv4)
