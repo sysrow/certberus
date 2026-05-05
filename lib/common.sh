@@ -341,7 +341,15 @@ EOF
     # Permissions (config.env may contain HMAC secret - 0600 root-only)
     [[ -f "$CB_CONFIG_FILE" ]] && chmod 0600 "$CB_CONFIG_FILE" 2>/dev/null
     [[ -f "$CB_ADVANCED_FILE" ]] && chmod 0600 "$CB_ADVANCED_FILE" 2>/dev/null
-    chmod 0700 "$CB_PREFIX" 2>/dev/null
+    # /etc/certberus + /etc/certberus/hooks must be traversable by www-data,
+    # otherwise the Apache mod_md MDMessageCMD adapter (running as www-data) cannot
+    # execute /etc/certberus/hooks/<event>.d/*. Secret files inside have 0600.
+    chmod 0755 "$CB_PREFIX" 2>/dev/null
+    chmod 0755 "$CB_HOOKS_DIR" 2>/dev/null
+    for ev in pre-issue post-issue post-reload renewing renewed installed errored \
+              ocsp-renewed ocsp-errored on-failure deploy; do
+        chmod 0755 "$CB_HOOKS_DIR/${ev}.d" 2>/dev/null
+    done
     return 0
 }
 

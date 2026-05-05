@@ -498,10 +498,18 @@ stage_install_hook_adapter() {
     cb_sep
     cb_log "Installing MDMessageCMD adapter -> $CB_MOD_MD_HOOK_SCRIPT"
     if [[ "$CB_DRY_RUN" == "0" ]]; then
-        mkdir -p "$(dirname "$CB_MOD_MD_HOOK_SCRIPT")"
+        local hook_dir; hook_dir="$(dirname "$CB_MOD_MD_HOOK_SCRIPT")"
+        mkdir -p "$hook_dir"
+        # /opt/certberus and parent must be traversable by www-data;
+        # otherwise Apache (running as www-data) cannot call MDMessageCMD
+        # and mod_md reports 'failed with exit code 255' = permission denied.
+        chmod 0755 "$hook_dir" 2>/dev/null || true
         cb_mod_md_adapter_body > "$CB_MOD_MD_HOOK_SCRIPT"
-        chmod +x "$CB_MOD_MD_HOOK_SCRIPT"
+        # 0750 + group www-data = root can edit, www-data can read+exec
+        chmod 0750 "$CB_MOD_MD_HOOK_SCRIPT"
         chown root:www-data "$CB_MOD_MD_HOOK_SCRIPT" 2>/dev/null || true
+        # CB_MOD_MD_DIR (mod_md store) stays 0700 root:root - Apache
+        # does not need it, mod_md writes paths via a different mechanism.
     fi
     cb_ok "Hook adapter OK"
 }
