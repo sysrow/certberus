@@ -71,6 +71,7 @@ Usage: certberus [GLOBAL] COMMAND [ARGS]
   doctor        Diagnostika (DNS, firewall, porty, moduly, verze)
   discover      Zobraz domeny ktere miri na tento server
   test-domain D Preflight (DNS+CAA+port 80+cert) pro jednu domenu
+  cert-info [D] Stav certu pro domenu (mod_md store, certbot, live HTTPS)
   renew         Vynutit obnovu (synonym pro auto/issue, idempotentni)
   revoke D      Revokovat cert pro domenu
   rollback      Vratit posledni snapshot
@@ -643,6 +644,104 @@ cmd_status() {
     fi
 }
 
+# Find mod_md store directory (differs per distro/version).
+_cb_find_md_store() {
+    local p
+    for p in /var/lib/apache2/md/md/store/domains \
+             /etc/apache2/md/md/store/domains \
+             /etc/apache2/md/domains \
+             /var/cache/apache2/md/domains; do
+        [[ -d "$p" ]] && { printf '%s' "$p"; return 0; }
+    done
+    # Posledni sance: najit kdekoliv pod /var nebo /etc
+    local found
+    found=$(find /var/lib/apache2 /etc/apache2 -maxdepth 6 -type d -name domains -path '*md*' 2>/dev/null | head -1)
+    [[ -n "$found" ]] && { printf '%s' "$found"; return 0; }
+    return 1
+}
+
+# certberus cert-info [DOMAIN]
+# Vypise zdroj a platnost certu pro domenu (mod_md, certbot, live HTTPS).
+# Bez DOMAIN: vypise vse co najde.
+cmd_cert_info() {
+    local d="${1:-}"
+    cb_banner "Certberus - cert-info${d:+ ($d)}"
+
+    local store; store="$(_cb_find_md_store 2>/dev/null || true)"
+    if [[ -n "$store" ]]; then
+        cb_log "mod_md store: $store"
+        local -a domains=()
+        if [[ -n "$d" ]]; then
+            [[ -d "$store/$d" ]] && domains=("$d")
+        else
+            local entry
+            for entry in "$store"/*/; do
+                [[ -d "$entry" ]] && domains+=("$(basename "$entry")")
+            done
+        fi
+        if (( ${#domains[@]} == 0 )); then
+            cb_log "  (zadne domeny v mod_md store${d:+ pro $d})"
+        else
+            local dom
+            for dom in "${domains[@]}"; do
+                cb_sep
+                cb_log "Domena: $dom"
+                local cert="$store/$dom/pubcert.pem"
+                local mdjson="$store/$dom/md.json"
+                if [[ -f "$cert" ]]; then
+                    cb_ok "  pubcert.pem existuje"
+                    openssl x509 -in "$cert" -noout -subject -issuer -dates 2>/dev/null | sed 's/^/    /'
+                else
+                    cb_warn "  pubcert.pem zatim neni (mod_md ho jeste nezadal nebo cekame na challenge)"
+                fi
+                if [[ -f "$mdjson" ]] && command -v jq >/dev/null 2>&1; then
+                    cb_log "  md.json state:"
+                    jq -r '{state, state_descr, renew, must_staple, cert?: (.cert | keys?), domains}' \
+                        "$mdjson" 2>/dev/null | sed 's/^/    /' || cat "$mdjson" | sed 's/^/    /'
+                elif [[ -f "$mdjson" ]]; then
+                    cb_log "  md.json (raw, nainstaluj jq pro hezky vypis):"
+                    head -20 "$mdjson" | sed 's/^/    /'
+                fi
+            done
+        fi
+        cb_sep
+    else
+        cb_log "mod_md store nenalezen (Apache mod_md neni v provozu)."
+    fi
+
+    # certbot certy
+    if command -v certbot >/dev/null 2>&1; then
+        cb_log "certbot certy:"
+        if [[ -n "$d" ]]; then
+            certbot certificates --domain "$d" 2>/dev/null | sed 's/^/  /'
+        else
+            certbot certificates 2>/dev/null | sed 's/^/  /'
+        fi
+        cb_sep
+    fi
+
+    # Live HTTPS test
+    if [[ -n "$d" ]]; then
+        cb_log "Live HTTPS na ${d}:443 :"
+        local live_cert
+        live_cert=$(echo | timeout 5 openssl s_client -servername "$d" -connect "$d:443" 2>/dev/null)
+        if [[ -n "$live_cert" ]]; then
+            printf '%s\n' "$live_cert" | openssl x509 -noout -subject -issuer -dates 2>/dev/null | sed 's/^/  /' \
+                || cb_warn "  s_client neuzavrel handshake (server moznasi jeste neni hotov)"
+        else
+            cb_warn "  Server nenavazal TLS spojeni (cert jeste neni nasazen?)"
+        fi
+        cb_sep
+    fi
+
+    # Apache error.log poslednich 10 mod_md radku
+    if [[ -f /var/log/apache2/error.log ]]; then
+        cb_log "Posledni mod_md radky z /var/log/apache2/error.log :"
+        grep -i 'md\[' /var/log/apache2/error.log 2>/dev/null | tail -10 | sed 's/^/  /' \
+            || cb_log "  (zadne mod_md radky)"
+    fi
+}
+
 cmd_doctor() {
     cb_banner "Certberus — diagnostics"
     cb_log "OS: $CB_OS_ID $CB_OS_VERSION (pkg: $CB_PKG_MGR)"
@@ -791,6 +890,7 @@ case "$CMD" in
     doctor)      cmd_doctor "$@" ;;
     discover)    cmd_discover "$@" ;;
     test-domain|test) cmd_test_domain "$@" ;;
+    cert-info|cert)   cmd_cert_info "$@" ;;
     expiry|expires) cmd_expiry "$@" ;;
     revoke)      cmd_revoke "$@" ;;
     rollback)    cmd_rollback "$@" ;;

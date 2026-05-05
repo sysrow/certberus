@@ -689,6 +689,21 @@ main() {
     cb_ok "Done. Domains: ${VALID_DOMAINS[*]}"
     cb_log "Log: $CB_LOG_FILE"
     [[ "$CB_STAGING" == "1" ]] && cb_warn "STAGING mode - cert is not trusted in browsers"
+
+    # Next steps: mod_md obtains the certificate ASYNCHRONOUSLY AFTER Apache reload.
+    # First issuance typically takes 10-60s, sometimes several minutes.
+    cb_sep
+    local _first="${VALID_DOMAINS[0]}"
+    cb_log "Next steps (mod_md requests cert ASYNCHRONOUSLY - typically 10-60s):"
+    cb_log ""
+    cb_log "  Wait a few seconds then:"
+    cb_log "    certberus cert-info ${_first}"
+    cb_log ""
+    cb_log "  Watch progress:"
+    cb_log "    tail -f /var/log/apache2/error.log | grep -i 'md\\['"
+    cb_log ""
+    cb_log "  If cert does not arrive within 5 minutes:"
+    cb_log "    certberus test-domain ${_first}     # checks DNS, CAA, port 80"
 }
 
 main "$@"
