@@ -195,6 +195,28 @@ if [[ -d "$D" ]]; then
     fi
 fi
 
+# Auto-graceful Apache on renewed/installed - without this, Apache would not
+# start using a cert issued in the background until the next 'systemctl reload apache2'.
+# Sudoers (/etc/sudoers.d/certberus_mod_md) allows 'apache2ctl graceful'
+# for www-data without a password. Disableable via CB_MOD_MD_AUTO_RELOAD=0.
+case "$EVENT" in
+    renewed|installed)
+        if [[ "${CB_MOD_MD_AUTO_RELOAD:-1}" == "1" ]]; then
+            APCH=""
+            for c in /usr/sbin/apache2ctl /usr/sbin/apachectl /usr/local/sbin/apache2ctl; do
+                [[ -x "$c" ]] && { APCH="$c"; break; }
+            done
+            if [[ -n "$APCH" ]]; then
+                if [[ "$(id -u)" == "0" ]]; then
+                    "$APCH" graceful >>"$LOG" 2>&1 || true
+                elif command -v sudo >/dev/null 2>&1; then
+                    sudo -n "$APCH" graceful >>"$LOG" 2>&1 || true
+                fi
+            fi
+        fi
+        ;;
+esac
+
 exit 0
 EOF
 }

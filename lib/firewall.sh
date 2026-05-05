@@ -154,16 +154,18 @@ cb_firewall_ensure_http_https() {
 
 # ACME firewall policy.
 #
-# HARICA/CESNET EAB u predvalidovanych organizaci casto nepotrebuje, aby
-# Certberus automaticky oteviral lokalni firewall. Nechavame webroot/HTTP-01
-# pripravu na miste, ale firewall mutace jsou pro HARICA opt-in.
+# HARICA/CESNET EAB for pre-validated organizations often does not need
+# Certberus to automatically open the local firewall. We keep webroot/HTTP-01
+# preparation in place, but firewall mutations are opt-in for HARICA.
 cb_firewall_acme_auto_open_enabled() {
-    [[ "${CB_FIREWALL_AUTO_OPEN:-1}" == "1" ]] || return 1
+    # Default OFF: certberus does not have to be the only firewall guardian (managed FW,
+    # site rules, fail2ban, ...). Admin opt-in: --firewall / CB_FIREWALL_AUTO_OPEN=1.
+    [[ "${CB_FIREWALL_AUTO_OPEN:-0}" == "1" ]] || return 1
 
     if [[ "${CB_CA:-}" == "harica" && "${CB_HARICA_FIREWALL_AUTO_OPEN:-0}" != "1" ]]; then
         if [[ -z "${_CB_HARICA_FIREWALL_WARNED:-}" ]]; then
-            cb_warn "CA=harica/EAB: automaticke otevirani firewallu preskakuji."
-            cb_warn "Pokud HARICA vrati HTTP-01 timeout, otevri porty 80/443 rucne nebo nastav CB_HARICA_FIREWALL_AUTO_OPEN=1."
+            cb_warn "CA=harica/EAB: skipping automatic firewall opening."
+            cb_warn "If HARICA returns HTTP-01 timeout, open ports 80/443 manually or set CB_HARICA_FIREWALL_AUTO_OPEN=1."
             _CB_HARICA_FIREWALL_WARNED=1
             export _CB_HARICA_FIREWALL_WARNED
         fi

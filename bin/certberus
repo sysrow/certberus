@@ -89,7 +89,9 @@ Usage: certberus [GLOBAL] COMMAND [ARGS]
   --domain D (repeatable)      --email E
   --eab-kid KID    --eab-hmac HMAC    --acme-url URL
   --webroot DIR    --port80 STRAT (tomcat: iptables|webroot|proxy)
-  --no-firewall    --open-firewall    --skip-dns-check
+  --firewall       Open ports 80/443 during 'auto' (default: do NOT open)
+  --no-firewall    Force certberus to leave the firewall alone
+  --skip-dns-check
   --set CB_X=Y     (repeatable, advanced override)
   -t/--staging   -y/--yes   -n/--dry-run   -v/--verbose
 
@@ -151,7 +153,7 @@ parse_global() {
                 cb_apply_cli_set "CB_FIREWALL_AUTO_OPEN=0"
                 CLI_SET_ARGS+=("CB_FIREWALL_AUTO_OPEN=0")
                 ;;
-            --open-firewall)
+            --firewall|--open-firewall)
                 cb_apply_cli_set "CB_FIREWALL_AUTO_OPEN=1"
                 cb_apply_cli_set "CB_HARICA_FIREWALL_AUTO_OPEN=1"
                 CLI_SET_ARGS+=("CB_FIREWALL_AUTO_OPEN=1" "CB_HARICA_FIREWALL_AUTO_OPEN=1")
@@ -210,8 +212,15 @@ build_forward_args() {
     [[ -n "$CLI_PORT80" && "$target_ws" == "tomcat" ]] && out+=(--port80 "$CLI_PORT80")
     local kv
     for kv in "${CLI_SET_ARGS[@]}"; do out+=(--set "$kv"); done
+    # Dedup domain list (CLI + auto-discover muzou nedat to same)
     local d
-    for d in $CLI_DOMAINS; do out+=(--domain "$d"); done
+    declare -A _seen=()
+    for d in $CLI_DOMAINS; do
+        [[ -z "$d" ]] && continue
+        [[ -n "${_seen[$d]:-}" ]] && continue
+        _seen[$d]=1
+        out+=(--domain "$d")
+    done
     printf '%s\n' "${out[@]}"
 }
 
@@ -596,6 +605,29 @@ cmd_auto() {
         cb_persist_config_skeleton "$email" "$_persist_domains" "$ca"
     fi
 
+    # Port-80 pre-flight: if admin didn't use --firewall, verify that
+    # ACME HTTP-01 has a chance. Failure is not fatal (mod_md retries next day),
+    # but we want admin to know what to do. Test is per-domain.
+    if [[ "${CB_FIREWALL_AUTO_OPEN:-0}" != "1" && "${CB_SKIP_PORT80_CHECK:-0}" != "1" ]]; then
+        local _doms="${CLI_DOMAINS:-${CB_DOMAINS:-}}"
+        local _first_dom; _first_dom=$(echo "$_doms" | tr -s ' ' '\n' | grep -v '^$' | head -1)
+        if [[ -n "$_first_dom" ]]; then
+            if ! timeout 4 bash -c "exec 3<>/dev/tcp/$_first_dom/80; exec 3>&-" 2>/dev/null; then
+                cb_warn "Port 80 on ${_first_dom} appears closed from outside (ACME HTTP-01 will fail)."
+                cb_log "  Solutions:"
+                cb_log "    A) temporarily open FW during issuance:"
+                cb_log "         certberus auto --firewall --email $email${_first_dom:+ --domain $_first_dom}"
+                cb_log "    B) open manually in existing policy (iptables/ufw/firewalld) then:"
+                cb_log "         certberus auto"
+                cb_log "    C) skip this check (proceed anyway):"
+                cb_log "         CB_SKIP_PORT80_CHECK=1 certberus auto"
+                cb_log ""
+                cb_log "  (CA needs GET on http://${_first_dom}/.well-known/acme-challenge/<token>)"
+                exit 2
+            fi
+        fi
+    fi
+
     cmd_issue "$@"
 }
 
@@ -680,7 +712,7 @@ _cb_find_md_store() {
 # Vypise zdroj a platnost certu pro domenu (mod_md, certbot, live HTTPS).
 # Bez DOMAIN: vypise vse co najde.
 cmd_cert_info() {
-    local d="${1:-}"
+    local d="${REMAINING[1]:-}"
     cb_banner "Certberus - cert-info${d:+ ($d)}"
 
     local store; store="$(_cb_find_md_store 2>/dev/null || true)"
