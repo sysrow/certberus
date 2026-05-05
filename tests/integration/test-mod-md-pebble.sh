@@ -184,26 +184,27 @@ docker exec "$APACHE_NAME" bash -c "
     cp -r /certberus /tmp/cb && cd /tmp/cb && ./install.sh --prefix /usr/local
 " >"$WORK_DIR/install.log" 2>&1 || { echo "install failed:"; tail -20 "$WORK_DIR/install.log"; exit 1; }
 
-echo "### 10) Apache vhost :80 + :443 (mod_md auto-deploy) ###"
+echo "### 10) Apache vhost :80 ONLY (certberus must add :443 stub itself) ###"
+# IMPORTANT: we intentionally do not add :443 vhost. Stage_ensure_ssl_vhost should create it.
+# This simulates a typical scenario 'sysadmin has only HTTP, certberus sets up HTTPS'.
 docker exec "$APACHE_NAME" bash -c "
     cat > /etc/apache2/sites-available/test.conf <<EOF
 <VirtualHost *:80>
     ServerName $DOMAIN
     DocumentRoot /var/www/html
 </VirtualHost>
-<VirtualHost *:443>
-    ServerName $DOMAIN
-    DocumentRoot /var/www/html
-    SSLEngine on
-</VirtualHost>
 EOF
     a2ensite test >/dev/null 2>&1
     service apache2 start >/dev/null 2>&1
 " || { echo "apache start failed"; exit 1; }
 
-echo "### 11) Spoustim certberus auto proti pebble:14000/dir ###"
+echo "### 11) Running certberus auto against pebble:14000/dir ###"
+# certberus auto must on its own:
+#   - create :443 stub vhost (missing)
+#   - wait for cert issuance (CB_POST_ISSUE_TIMEOUT)
+#   - force graceful so the cert goes live
 docker exec "$APACHE_NAME" bash -c "
-    /usr/local/sbin/certberus auto \
+    CB_POST_ISSUE_TIMEOUT=180 /usr/local/sbin/certberus auto \
         --webserver apache \
         --email admin@$DOMAIN \
         --domain $DOMAIN \
@@ -211,22 +212,14 @@ docker exec "$APACHE_NAME" bash -c "
         --yes
 " >"$WORK_DIR/certberus.log" 2>&1
 CB_RC=$?
-[[ $CB_RC -eq 0 ]] || { echo "[WARN] certberus auto rc=$CB_RC, pokracuju do assertu"; tail -20 "$WORK_DIR/certberus.log"; }
+[[ $CB_RC -eq 0 ]] || { echo "[WARN] certberus auto rc=$CB_RC, continuing to asserts"; tail -30 "$WORK_DIR/certberus.log"; }
 
-# Pockame na issuance. mod_md vystavi cert v STAGING, presun do domains/<dom>
-# se deje az na nasledujicim graceful reloadu - tak periodicky reloadujeme.
-echo "### 12) Cekam na vystaveni certifikatu (max 180s, periodicky reload) ###"
-ISSUED=0
-for i in $(seq 1 36); do
-    if docker exec "$APACHE_NAME" test -s /etc/apache2/md/domains/$DOMAIN/pubcert.pem 2>/dev/null; then
-        ISSUED=1; break
-    fi
-    # kazdych 15s force reload at mod_md presune cert ze staging do domains
-    if (( i % 3 == 0 )); then
-        docker exec "$APACHE_NAME" service apache2 reload >/dev/null 2>&1 || true
-    fi
-    sleep 5
-done
+# certberus already waited and called graceful. Just verify current state.
+if docker exec "$APACHE_NAME" test -s /etc/apache2/md/domains/$DOMAIN/pubcert.pem 2>/dev/null; then
+    ISSUED=1
+else
+    ISSUED=0
+fi
 
 # -------- ASSERTIONS --------
 echo "### Assertions ###"
@@ -295,10 +288,8 @@ else
     nok "apache graceful reload NOT detected"
 fi
 
-# A8) :443 servuje Pebble cert
+# A8) :443 serves Pebble cert -- NO manual reload, certberus already did it
 if [[ "$ISSUED" == "1" ]]; then
-    docker exec "$APACHE_NAME" service apache2 reload >/dev/null 2>&1
-    sleep 2
     SERVED=$(docker exec "$APACHE_NAME" bash -c "
         echo | openssl s_client -connect 127.0.0.1:443 -servername $DOMAIN 2>/dev/null \
             | openssl x509 -noout -issuer 2>/dev/null
@@ -306,7 +297,7 @@ if [[ "$ISSUED" == "1" ]]; then
     if echo "$SERVED" | grep -qi "Pebble"; then
         ok ":443 serves Pebble cert ($SERVED)"
     else
-        nok ":443 nevadi Pebble cert: '$SERVED'"
+        nok ":443 does not serve Pebble cert: '$SERVED'"
     fi
 
     HTTP=$(docker exec "$APACHE_NAME" curl -sk -o /dev/null -w "%{http_code}" \
@@ -316,6 +307,20 @@ if [[ "$ISSUED" == "1" ]]; then
     else
         nok "https://$DOMAIN/ returns '$HTTP' (expected 200)"
     fi
+fi
+
+# A9) certberus log contains 'graceful OK' from post_issue_activate
+if grep -q "Force graceful Apache" "$WORK_DIR/certberus.log" 2>/dev/null; then
+    ok "post_issue_activate stage probehla (force graceful)"
+else
+    nok "post_issue_activate stage NOT recorded in log"
+fi
+
+# A10) certberus created :443 stub vhost on its own (test.conf had only :80)
+if docker exec "$APACHE_NAME" test -f /etc/apache2/sites-enabled/certberus-ssl.conf; then
+    ok "certberus created stub :443 vhost (certberus-ssl.conf)"
+else
+    nok "certberus did NOT create stub :443 vhost"
 fi
 
 echo
