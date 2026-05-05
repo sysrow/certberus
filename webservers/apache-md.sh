@@ -792,8 +792,24 @@ stage_test_reload() {
 # Apache has not yet loaded, it forces a graceful itself. Idempotent - if Apache already
 # serves the LE cert, we just confirm and exit.
 #
-# Vypnutelne pres CB_POST_ISSUE_WAIT=0 (default 1).
-# Timeout pres CB_POST_ISSUE_TIMEOUT (default 120 sekund).
+# stage_post_issue_activate
+# ----------------------------------------------------------------------------
+# mod_md needs TWO gracefuls:
+#   1) first graceful (stage_test_reload) -> mod_md loads MDomain, starts ACME
+#      job in background, stores cert in /etc/apache2/md/staging/<dom>/, emits
+#      AH10059 'will be activated on next graceful server restart'. No
+#      MDMessageCmd event is emitted.
+#   2) second graceful -> mod_md detects the staging cert, MIGRATES it to domains/,
+#      emits 'renewed' + 'installed' events. The adapter reacts to them.
+# Without this second graceful the cert would sit in staging indefinitely.
+#
+# The reference implementation (reference-implementation) solves this
+# by having the sysadmin manually run 'systemctl reload apache2' after the script.
+# We do this automatically.
+#
+# We poll for the staging cert so we can do a graceful AS SOON AS ACME arrives
+# (typically 5-30s). Default timeout 120s via CB_POST_ISSUE_TIMEOUT.
+# Can be disabled via CB_POST_ISSUE_WAIT=0.
 stage_post_issue_activate() {
     [[ "${CB_POST_ISSUE_WAIT:-1}" == "1" ]] || { cb_debug "post_issue_activate disabled"; return 0; }
     [[ "$CB_DRY_RUN" == "1" ]] && return 0
@@ -802,105 +818,37 @@ stage_post_issue_activate() {
     local primary="${VALID_DOMAINS[0]:-}"
     [[ -z "$primary" ]] && return 0
 
-    # mod_md ma DVA store dirs:
-    #   /etc/apache2/md/staging/<dom>/  - cert ktery prave dorazil z ACME, ale
-    #                                     Apache ho jeste nenacetl. Tady se
-    #                                     objevi pubcert.pem hned po vystaveni.
-    #   /etc/apache2/md/domains/<dom>/  - cert ktery JE live (Apache ho servuje).
-    #                                     Sem se cert presune az pri 'graceful'.
-    #
-    # mod_md NEemituje zadny MDMessageCmd event mezi 'cert v staging' a
-    # 'admin udelal graceful'. Logovani je AH10059 'will be activated on next
-    # graceful server restart' - to je vsechno. Takze post_issue_activate
-    # POLL-uje staging, a kdyz tam najde cert, sam donuti graceful, coz spusti
-    # presun do domains a 'installed' event pro adapter.
     local md_root="${CB_MOD_MD_APACHE_STORE_ROOT:-/etc/apache2/md}"
     local staging_cert="$md_root/staging/$primary/pubcert.pem"
     local domains_cert="$md_root/domains/$primary/pubcert.pem"
     local timeout="${CB_POST_ISSUE_TIMEOUT:-120}"
 
-    cb_log "Cekam na vystaveni certifikatu (max ${timeout}s, mod_md staging=$md_root/staging)"
+    cb_log "Cekam na ACME issue (max ${timeout}s, sledujem $md_root/staging/$primary/)"
 
-    local waited=0 step=3 ready=0
+    local waited=0 step=3
     while (( waited < timeout )); do
-        # Cert uz je v domains (z minuleho behu) -> hotovo, jen overime serving.
-        if [[ -s "$domains_cert" ]]; then
-            ready=2
-            break
-        fi
-        # Cert je v staging -> potrebujeme graceful
-        if [[ -s "$staging_cert" ]]; then
-            ready=1
-            break
-        fi
+        # Cert uz je v domains (z minuleho behu) -> hotovo
+        [[ -s "$domains_cert" ]] && { cb_ok "Cert uz je v domains/ (z minuleho behu)"; return 0; }
+        # Cert je v staging -> druhy graceful ho aktivuje
+        [[ -s "$staging_cert" ]] && break
         sleep "$step"
         waited=$(( waited + step ))
     done
 
-    if (( ready == 0 )); then
-        cb_warn "Cert v $md_root/{staging,domains}/$primary/pubcert.pem nedorazil za ${timeout}s"
-        cb_log "  mod_md mozna stale jedna s CA. Sleduj:"
-        cb_log "    tail -f /var/log/apache2/error.log | grep -i 'md\\['"
-        cb_log "  Az dorazi, spust: $APACHECTL graceful"
+    if [[ ! -s "$staging_cert" ]]; then
+        cb_warn "ACME job se nedokoncil za ${timeout}s. Az dorazi cert do staging,"
+        cb_warn "  spust rucne: $APACHECTL graceful"
+        cb_warn "  (sleduj: tail -f /var/log/apache2/error.log | grep -i 'md\\[')"
         return 0
     fi
 
-    if (( ready == 1 )); then
-        cb_ok "Cert v staging: $staging_cert"
-        cb_log "Force graceful Apache (presun staging -> domains, aktivace certu)"
-        if "$APACHECTL" graceful >>"$CB_LOG_FILE" 2>&1; then
-            cb_ok "graceful OK"
-        else
-            cb_warn "graceful selhal - zkus rucne: $APACHECTL graceful"
-            return 0
-        fi
-        # Pockame chvili nez mod_md presun dokonci
-        local s=0
-        while (( s < 15 )); do
-            [[ -s "$domains_cert" ]] && break
-            sleep 1; s=$((s+1))
-        done
+    cb_ok "Cert in staging: $staging_cert"
+    cb_log "Second Apache graceful (mod_md migrates staging -> domains)"
+    if "$APACHECTL" graceful >>"$CB_LOG_FILE" 2>&1; then
+        cb_ok "graceful OK - mod_md adapter receives 'renewed' + 'installed' event"
     else
-        cb_ok "Cert uz je v domains: $domains_cert (z minuleho behu)"
-        # I tak udelame graceful, kdyby Apache mel cached starou verzi
-        "$APACHECTL" graceful >>"$CB_LOG_FILE" 2>&1 || true
+        cb_warn "graceful failed - try manually: $APACHECTL graceful"
     fi
-
-    if [[ ! -s "$domains_cert" ]]; then
-        cb_warn "Cert se NEpresunul do $domains_cert ani po graceful"
-        return 0
-    fi
-
-    # Zjisti issuer & expiry pro vypis
-    local issuer notafter
-    issuer=$(timeout 3 openssl x509 -in "$domains_cert" -noout -issuer </dev/null 2>/dev/null | sed 's/^issuer=//')
-    notafter=$(timeout 3 openssl x509 -in "$domains_cert" -noout -enddate </dev/null 2>/dev/null | sed 's/^notAfter=//')
-    [[ -n "$issuer"   ]] && cb_log "  issuer:  $issuer"
-    [[ -n "$notafter" ]] && cb_log "  expires: $notafter"
-
-    # Sanity check: openssl s_client proti :443 musi vratit issuer ktery NENI
-    # snakeoil/fallback. Pokud LE cert se neaktivoval, je to user-actionable.
-    sleep 2
-    local served_issuer
-    served_issuer=$(echo | timeout 5 openssl s_client \
-        -servername "$primary" -connect "127.0.0.1:443" </dev/null 2>/dev/null \
-        | timeout 3 openssl x509 -noout -issuer 2>/dev/null \
-        | sed 's/^issuer=//')
-    if [[ -z "$served_issuer" ]]; then
-        cb_warn ":443 nereaguje - mozna chybi Listen 443 nebo apache2 nenastartoval"
-        return 0
-    fi
-
-    case "$served_issuer" in
-        *snakeoil*|*certberus-fallback*)
-            cb_warn ":443 stale servuje fallback ($served_issuer)"
-            cb_warn "  Apache cert nenahral. Zkus: $APACHECTL -t && $APACHECTL graceful"
-            cb_warn "  Nebo zkontroluj ze ServerName v :443 vhostu = $primary"
-            ;;
-        *)
-            cb_ok ":443 servuje cert: $served_issuer"
-            ;;
-    esac
 }
 
 # ============================================================================

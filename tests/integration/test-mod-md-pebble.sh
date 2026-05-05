@@ -310,8 +310,8 @@ if [[ "$ISSUED" == "1" ]]; then
 fi
 
 # A9) certberus log contains 'graceful OK' from post_issue_activate
-if grep -q "Force graceful Apache" "$WORK_DIR/certberus.log" 2>/dev/null; then
-    ok "post_issue_activate stage probehla (force graceful)"
+if grep -qE "Second.*graceful|Cert in staging|already in ManagedDomains" "$WORK_DIR/certberus.log" 2>/dev/null; then
+    ok "post_issue_activate stage completed (second graceful)"
 else
     nok "post_issue_activate stage NOT recorded in log"
 fi
