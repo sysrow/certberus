@@ -21,6 +21,7 @@ CB_KNOWN_EVENTS=(
     pre-issue post-issue
     pre-deploy post-deploy
     pre-reload post-reload
+    post-renew
     on-failure on-rollback
     renewing renewed installed expiring errored
     ocsp-renewed ocsp-errored challenge-setup

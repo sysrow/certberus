@@ -357,7 +357,10 @@ EOF
 # Called on successful cmd_auto when admin did not provide config (typically bundle).
 # Never overwrites existing values - only fills in missing keys.
 cb_persist_config_skeleton() {
-    [[ "$(id -u 2>/dev/null)" == "0" ]] || return 0
+    if [[ "$(id -u 2>/dev/null)" != "0" ]]; then
+        cb_warn "Saving config.env requires root. Run as root (sudo)."
+        return 1
+    fi
     [[ -f "$CB_CONFIG_FILE" ]] && return 0  # already exists, do not overwrite
     local email="${1:-}" domains="${2:-}" ca="${3:-letsencrypt}"
     local eab_kid="${4:-}" eab_hmac="${5:-}" acme_url="${6:-}"

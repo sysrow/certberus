@@ -573,8 +573,8 @@ cmd_install() {
         fi
     fi
 
-    # Nabidnout ulozeni do config.env
-    if cb_has_tty && [[ "$CB_ASSUME_YES" != "1" && ! -f "$CB_CONFIG_FILE" ]]; then
+    # Offer to save config.env (only as root, otherwise no point asking)
+    if [[ "$(id -u 2>/dev/null)" == "0" ]] && cb_has_tty && [[ "$CB_ASSUME_YES" != "1" && ! -f "$CB_CONFIG_FILE" ]]; then
         echo
         if cb_ask_yn "Save settings to $CB_CONFIG_FILE for future automatic renewals (certberus auto)?" "Y/n"; then
             local _email="${CLI_EMAIL:-}"
@@ -582,9 +582,10 @@ cmd_install() {
                 read -r -p "Contact email for CA: " _email </dev/tty
                 [[ -n "$_email" ]] && CLI_EMAIL="$_email"
             fi
-            cb_persist_config_skeleton "${CLI_EMAIL:-}" "" "${CB_CA_CLI:-letsencrypt}" \
-                "${CLI_EAB_KID:-}" "${CLI_EAB_HMAC:-}" "${CLI_ACME_URL:-}"
-            cb_ok "Ulozeno do $CB_CONFIG_FILE"
+            if cb_persist_config_skeleton "${CLI_EMAIL:-}" "" "${CB_CA_CLI:-letsencrypt}" \
+                "${CLI_EAB_KID:-}" "${CLI_EAB_HMAC:-}" "${CLI_ACME_URL:-}"; then
+                cb_ok "Saved to $CB_CONFIG_FILE"
+            fi
         fi
     fi
 
@@ -673,7 +674,7 @@ cmd_auto() {
         # trim wrapping whitespace (CLI_DOMAINS accumulates leading space via "$x $y")
         _persist_domains="${_persist_domains#"${_persist_domains%%[![:space:]]*}"}"
         _persist_domains="${_persist_domains%"${_persist_domains##*[![:space:]]}"}"
-        cb_persist_config_skeleton "$email" "$_persist_domains" "$ca"
+        cb_persist_config_skeleton "$email" "$_persist_domains" "$ca" || true
     fi
 
     # Port-80 pre-flight: if admin didn't use --firewall, verify that
@@ -1068,6 +1069,7 @@ cmd_hooks() {
 cmd_renew() {
     CB_ASSUME_YES=1
     cb_banner "Certberus — renew existing certificates"
+    cb_require_root
     local any=0
 
     # certbot renew (only renews certs it already manages)
@@ -1121,22 +1123,34 @@ cmd_snapshots() {
         cb_warn "Directory $CB_BACKUP_DIR does not exist (no snapshots yet)."
         return 0
     fi
-    local -a snaps=()
-    mapfile -t snaps < <(find "$CB_BACKUP_DIR" -maxdepth 1 -type f -name '*.tar.gz' -printf '%T@ %s %p\n' 2>/dev/null | sort -rn)
-    if (( ${#snaps[@]} == 0 )); then
+    local -a files=()
+    mapfile -t files < <(find "$CB_BACKUP_DIR" -maxdepth 1 -type f -name '*.tar.gz' 2>/dev/null)
+    if (( ${#files[@]} == 0 )); then
         cb_warn "No snapshots in $CB_BACKUP_DIR"
         return 0
     fi
+    # stat -c is POSIX-compatible (works on busybox/Alpine too, unlike find -printf)
+    local -a snaps=()
+    local f
+    for f in "${files[@]}"; do
+        local mtime sz
+        mtime=$(stat -c '%Y' "$f" 2>/dev/null) || continue
+        sz=$(stat -c '%s' "$f" 2>/dev/null) || sz=0
+        snaps+=("$mtime $sz $f")
+    done
+    IFS=$'\n' read -r -d '' -a snaps < <(printf '%s\n' "${snaps[@]}" | sort -rn) || true
+
     printf '  %-20s %10s  %s\n' "DATE" "SIZE" "FILE"
     printf '  %-20s %10s  %s\n' "$(printf '%0.s─' {1..20})" "$(printf '%0.s─' {1..10})" "$(printf '%0.s─' {1..40})"
     local line
     for line in "${snaps[@]}"; do
+        [[ -z "$line" ]] && continue
         local ts_epoch sz path
         ts_epoch="${line%% *}"
         line="${line#* }"
         sz="${line%% *}"
         path="${line#* }"
-        local ts_human; ts_human=$(date -d "@${ts_epoch%.*}" '+%F %T' 2>/dev/null || echo "?")
+        local ts_human; ts_human=$(date -d "@$ts_epoch" '+%F %T' 2>/dev/null || echo "?")
         local sz_human
         if (( sz > 1048576 )); then
             sz_human="$(( sz / 1048576 )) MB"
@@ -1148,8 +1162,8 @@ cmd_snapshots() {
         printf '  %-20s %10s  %s\n' "$ts_human" "$sz_human" "$(basename "$path")"
     done
     echo
-    cb_log "Celkem: ${#snaps[@]} snapshot(u) v $CB_BACKUP_DIR"
-    cb_log "Rollback: certberus rollback  (pouzije nejnovejsi)"
+    cb_log "Total: ${#files[@]} snapshot(s) in $CB_BACKUP_DIR"
+    cb_log "Rollback: certberus rollback  (uses latest)"
 }
 
 # -------- Command: logs [N] --------
