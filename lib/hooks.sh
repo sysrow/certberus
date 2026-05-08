@@ -53,41 +53,33 @@ cb_run_hooks() {
     local have_timeout=0
     command -v timeout >/dev/null 2>&1 && have_timeout=1
 
-    if false; then
-        # (run-parts cesta vyrazena - regex umoznoval .example/.bak; ponechano jen
-        # pro historickou referenci, viz git blame)
-        :
-    else
-        # Manualni fallback (RHEL apod.) - timeout per-hook
-        local prev_nullglob
-        prev_nullglob=$(shopt -p nullglob)
-        shopt -s nullglob
-        for f in "$dir"/*; do
-            [[ -x "$f" ]] || continue
-            [[ "$f" == *.example || "$f" == *.bak || "$f" == *.disabled ]] && continue
-            ((count++))
-            cb_debug "Hook: $f (timeout=${to}s)"
-            if (( have_timeout )); then
-                timeout "$to" "$f"; rc=$?
+    local prev_nullglob
+    prev_nullglob=$(shopt -p nullglob)
+    shopt -s nullglob
+    for f in "$dir"/*; do
+        [[ -x "$f" ]] || continue
+        [[ "$f" == *.example || "$f" == *.bak || "$f" == *.disabled ]] && continue
+        ((count++))
+        cb_debug "Hook: $f (timeout=${to}s)"
+        if (( have_timeout )); then
+            timeout "$to" "$f"; rc=$?
+        else
+            "$f"; rc=$?
+        fi
+        if (( rc != 0 )); then
+            if (( rc == 124 )); then
+                cb_error "Hook timeout (>${to}s): $f"
             else
-                "$f"; rc=$?
+                cb_warn "Hook failed (rc=$rc): $f"
             fi
-            if (( rc != 0 )); then
-                if (( rc == 124 )); then
-                    cb_error "Hook timeout (>${to}s): $f"
-                else
-                    cb_warn "Hook selhal (rc=$rc): $f"
-                fi
-                failed=1
-                # Pre-* hook fail zastavi pipeline - obnov nullglob
-                if [[ "$event" == pre-* ]]; then
-                    eval "$prev_nullglob"
-                    return "$rc"
-                fi
+            failed=1
+            if [[ "$event" == pre-* ]]; then
+                eval "$prev_nullglob"
+                return "$rc"
             fi
-        done
-        eval "$prev_nullglob"
-    fi
+        fi
+    done
+    eval "$prev_nullglob"
 
     (( failed == 0 )) && return 0 || return 1
 }

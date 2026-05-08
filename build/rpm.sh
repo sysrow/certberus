@@ -69,7 +69,7 @@ install -m 0755 bin/certberus %{buildroot}%{_sbindir}/certberus
 # Fix CB_LIB_DIR lookup (RPM uses /usr/lib, not /usr/local/lib)
 sed -i 's|/usr/local/lib/certberus|%{_prefix}/lib/certberus|g' %{buildroot}%{_sbindir}/certberus
 
-for f in common.sh os.sh dns.sh firewall.sh hooks.sh discover.sh preflight.sh; do
+for f in common.sh os.sh dns.sh firewall.sh hooks.sh discover.sh preflight.sh scan.sh; do
     install -m 0644 lib/\$f %{buildroot}%{_prefix}/lib/certberus/\$f
 done
 

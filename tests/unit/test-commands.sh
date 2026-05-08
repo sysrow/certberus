@@ -249,6 +249,52 @@ grep -q 'CB_RETRY_COUNT' "$CERT_ROOT/webservers/tomcat-certbot.sh" && \
 grep -q 'CB_RETRY_DELAY' "$CERT_ROOT/webservers/tomcat-certbot.sh" && \
     _pass "tomcat pouziva CB_RETRY_COUNT/DELAY" || _fail "tomcat ignoruje retry config"
 
+echo "=== Test 37: snapshots command ==="
+OUT=$("$CERTBERUS" snapshots 2>&1 || true)
+echo "$OUT" | grep -qiE 'snapshot|zadne' && _pass "snapshots funguje" || _fail
+
+echo "=== Test 38: snapshots s daty ==="
+# Vytvorime dummy snapshot
+mkdir -p "$CB_BACKUP_DIR"
+echo "dummy" | gzip > "$CB_BACKUP_DIR/apache2-pre-test-20250101-120000-0-1234.tar.gz"
+OUT=$("$CERTBERUS" snapshots 2>&1 || true)
+echo "$OUT" | grep -q 'apache2-pre-test' && _pass "snapshots vypise existujici" || _fail
+
+echo "=== Test 39: logs command ==="
+# certberus sam vytvori log pri startu, takze soubor uz existuje
+"$CERTBERUS" logs >/dev/null 2>&1; rc=$?
+[[ $rc -eq 0 ]] && _pass "logs exit 0" || _fail "logs exit $rc"
+
+echo "=== Test 40: logs command (s daty) ==="
+mkdir -p "$(dirname "$CB_LOG_FILE")"
+echo "[2025-01-01] [INFO] test radek" > "$CB_LOG_FILE"
+OUT=$("$CERTBERUS" logs 2>&1 || true)
+echo "$OUT" | grep -q 'test radek' && _pass "logs zobrazuje data" || _fail
+
+echo "=== Test 41: logs s argumentem N ==="
+for i in $(seq 1 10); do echo "radek $i" >> "$CB_LOG_FILE"; done
+OUT=$("$CERTBERUS" logs 3 2>&1 || true)
+LINE_COUNT=$(echo "$OUT" | wc -l)
+(( LINE_COUNT <= 4 )) && _pass "logs 3 vraci max 3 radky" || _fail "vraci $LINE_COUNT"
+
+echo "=== Test 42: renew v prazdnem prostredi ==="
+OUT=$("$CERTBERUS" renew 2>&1 || true)
+echo "$OUT" | grep -qiE 'zadne|obnov' && _pass "renew bez certu varuje" || _fail
+
+echo "=== Test 43: cert-info bez domeny (summary) ==="
+OUT=$("$CERTBERUS" cert-info 2>&1 || true)
+echo "$OUT" | grep -qiE 'prehled|DOMENA|zadne' && _pass "cert-info summary" || _fail
+
+echo "=== Test 44: cert-info s domenou (detail) ==="
+OUT=$("$CERTBERUS" cert-info example.com 2>&1 || true)
+echo "$OUT" | grep -q 'cert-info: example.com' && _pass "cert-info detail banner" || _fail
+
+echo "=== Test 45: help mentions snapshots ==="
+OUT=$("$CERTBERUS" help 2>&1)
+echo "$OUT" | grep -q 'snapshots' && _pass "help: snapshots" || _fail
+echo "$OUT" | grep -q 'logs' && _pass "help: logs" || _fail
+echo "$OUT" | grep -q 'renew' && _pass "help: renew" || _fail
+
 echo
 echo "==============================="
 echo "  PASS: $PASS   FAIL: $FAIL"

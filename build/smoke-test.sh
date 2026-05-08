@@ -10,6 +10,7 @@ VERSION="$(cat "$REPO_ROOT/build/VERSION" | tr -d '[:space:]')"
 
 FAIL=0
 PASS=0
+SKIP=0
 
 check_docker() {
     command -v docker >/dev/null 2>&1 || { echo "Docker is missing"; exit 2; }
@@ -21,7 +22,8 @@ smoke() {
     echo ""
     echo "=== $name ($image) ==="
     if [[ ! -f "$DIST/$artifact" ]]; then
-        echo "  [SKIP] $artifact neexistuje"
+        echo "  [SKIP] $artifact does not exist"
+        SKIP=$((SKIP+1))
         return 0
     fi
     local out
@@ -88,6 +90,6 @@ smoke ".apk (alpine:3.20)" "alpine:3.20" \
 
 echo ""
 echo "======================================"
-echo "  Smoke test: $PASS pass, $FAIL fail"
+echo "  Smoke test: $PASS pass, $FAIL fail, $SKIP skip"
 echo "======================================"
 exit $FAIL

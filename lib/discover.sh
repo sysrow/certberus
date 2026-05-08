@@ -261,13 +261,13 @@ cb_discover_all() {
     # In case cb_discover_all is called in a subshell (mapfile < <(...)),
     # we write stats to a file; the caller can retrieve them via cb_discover_load_stats.
     : "${CB_DISC_STATE_FILE:=${TMPDIR:-/tmp}/certberus-disc-$$.env}"
-    {
+    ( umask 077; {
         echo "CB_DISC_FROM_CERTBOT=${CB_DISC_FROM_CERTBOT}"
         echo "CB_DISC_FROM_MOD_MD=${CB_DISC_FROM_MOD_MD:-0}"
         echo "CB_DISC_FROM_WEBSERVER=${CB_DISC_FROM_WEBSERVER}"
         echo "CB_DISC_FROM_HTTPS=${CB_DISC_FROM_HTTPS}"
         printf 'CB_DISC_SKIPPED_NO_RESOLVE=%q\n' "$CB_DISC_SKIPPED_NO_RESOLVE"
-    } > "$CB_DISC_STATE_FILE" 2>/dev/null || true
+    } > "$CB_DISC_STATE_FILE" 2>/dev/null || true )
 
     (( ${#good[@]} > 0 )) && printf '%s\n' "${good[@]}"
 }

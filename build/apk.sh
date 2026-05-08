@@ -59,7 +59,7 @@ package() {
     install -m 0755 bin/certberus "\$pkgdir"/usr/sbin/certberus
     sed -i 's|/usr/local/lib/certberus|/usr/lib/certberus|g' "\$pkgdir"/usr/sbin/certberus
 
-    for f in common.sh os.sh dns.sh firewall.sh hooks.sh discover.sh preflight.sh; do
+    for f in common.sh os.sh dns.sh firewall.sh hooks.sh discover.sh preflight.sh scan.sh; do
         install -m 0644 lib/\$f "\$pkgdir"/usr/lib/certberus/\$f
     done
     for f in apache-md.sh apache-md-eab.sh nginx-certbot.sh tomcat-certbot.sh; do

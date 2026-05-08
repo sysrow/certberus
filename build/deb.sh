@@ -30,7 +30,7 @@ install -m 0755 "$SRC/bin/certberus" "$PKGROOT/usr/sbin/certberus"
 sed -i 's|/usr/local/lib/certberus|/usr/lib/certberus|g' "$PKGROOT/usr/sbin/certberus"
 
 # Lib
-for f in common.sh os.sh dns.sh firewall.sh hooks.sh discover.sh preflight.sh; do
+for f in common.sh os.sh dns.sh firewall.sh hooks.sh discover.sh preflight.sh scan.sh; do
     install -m 0644 "$SRC/lib/$f" "$PKGROOT/usr/lib/certberus/$f"
 done
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 # tests/test-discover.sh
-# Offline testy discover.sh + --auto/--force s mockovanym certbot a DNS.
-# Spust:  bash tests/test-discover.sh
+# Offline tests for discover.sh + --auto with mocked certbot and DNS.
+# Run:  bash tests/test-discover.sh
 set -uo pipefail
 
 CERT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -166,25 +166,25 @@ OUT=$(cb_filter_points_here example.com www.example.com bar.other.test elsewhere
 echo "=== Test 6: cb_discover_all ==="
 OUT=$(cb_discover_all apache 2>/dev/null)
 cb_discover_load_stats
-echo "$OUT" | grep -qFx "example.com"     && _pass "all obsahuje example.com" || _fail
-echo "$OUT" | grep -qFx "www.example.com" && _pass "all obsahuje www" || _fail
-echo "$OUT" | grep -qFx "foo.other.test"  && _pass "all obsahuje foo.other.test (z certbot)" || _fail
-echo "$OUT" | grep -qFx "bar.other.test"  && _fail "NESMI obsahovat bar.other.test" || _pass "odmitnuto"
-echo "$OUT" | grep -qFx "elsewhere.com"   && _fail "NESMI obsahovat elsewhere" || _pass "odmitnuto"
+echo "$OUT" | grep -qFx "example.com"     && _pass "all contains example.com" || _fail
+echo "$OUT" | grep -qFx "www.example.com" && _pass "all contains www" || _fail
+echo "$OUT" | grep -qFx "foo.other.test"  && _pass "all contains foo.other.test (from certbot)" || _fail
+echo "$OUT" | grep -qFx "bar.other.test"  && _fail "MUST NOT contain bar.other.test" || _pass "rejected"
+echo "$OUT" | grep -qFx "elsewhere.com"   && _fail "MUST NOT contain elsewhere" || _pass "rejected"
 
-# CB_DISC_SKIPPED_NO_RESOLVE musi obsahovat bar + elsewhere
-[[ "${CB_DISC_SKIPPED_NO_RESOLVE:-}" == *bar.other.test* ]] && _pass "skipped zaznamena bar" || _fail "skipped: $CB_DISC_SKIPPED_NO_RESOLVE"
-[[ "${CB_DISC_SKIPPED_NO_RESOLVE:-}" == *elsewhere* ]] && _pass "skipped zaznamena elsewhere" || _fail
+# CB_DISC_SKIPPED_NO_RESOLVE must contain bar + elsewhere
+[[ "${CB_DISC_SKIPPED_NO_RESOLVE:-}" == *bar.other.test* ]] && _pass "skipped records bar" || _fail "skipped: $CB_DISC_SKIPPED_NO_RESOLVE"
+[[ "${CB_DISC_SKIPPED_NO_RESOLVE:-}" == *elsewhere* ]] && _pass "skipped records elsewhere" || _fail
 
 echo "=== Test 7: auto mode without email ==="
-# Pustime bin/certberus issue --auto --force bez emailu
-OUT=$("$CERT_ROOT/bin/certberus" issue --webserver apache --auto --force 2>&1 || true)
+# certberus auto without email must fail
+OUT=$("$CERT_ROOT/bin/certberus" auto --webserver apache 2>&1 || true)
 echo "$OUT" | grep -qi 'email' && _pass "fails with missing email" || { _fail "not caught"; echo "$OUT" | head -5; }
 
 echo "=== Test 8: auto mode - no domains pointing here ==="
-# Tam kde DNS nic nevraci pro 1.2.3.4
-# Pouzijeme isolated mock bez matchujicich domen
-MOCK2=$(_pick_exec_base) || { echo "Nelze najit exec-capable mount"; exit 1; }
+# Where DNS returns nothing for 1.2.3.4
+# Use an isolated mock without matching domains
+MOCK2=$(_pick_exec_base) || { echo "Cannot find exec-capable mount"; exit 1; }
 cat > "$MOCK2/dig" <<'M'
 #!/bin/bash
 for a in "$@"; do
@@ -195,7 +195,7 @@ done
 M
 chmod +x "$MOCK2/dig"
 cp "$MOCK/curl" "$MOCK/apachectl" "$MOCK/certbot" "$MOCK/nginx" "$MOCK2/"
-OUT=$(PATH="$MOCK2:$PATH" "$CERT_ROOT/bin/certberus" issue --webserver apache --auto --force --email test@example.com 2>&1 || true)
+OUT=$(PATH="$MOCK2:$PATH" "$CERT_ROOT/bin/certberus" auto --webserver apache --email test@example.com 2>&1 || true)
 echo "$OUT" | grep -qi 'no domain found\|No valid domain' && _pass "fails when no domains found" || { _fail "not caught"; echo "$OUT" | head -5; }
 rm -rf "$MOCK2"
 

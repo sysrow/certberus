@@ -337,7 +337,7 @@ root = ET.parse('$TOMCAT_SERVER_XML').getroot()
 for c in root.iter('Connector'):
     p = c.attrib.get('protocol', '')
     port = c.attrib.get('port', '')
-    if 'HTTP' in p and 'redirectPort' not in c.attrib or ('HTTP' in p and port != '443'):
+    if 'HTTP' in p and ('redirectPort' not in c.attrib or port != '443'):
         print(port); break
 " 2>/dev/null || echo 8080)
             [[ -z "$tomcat_http_port" ]] && tomcat_http_port=8080

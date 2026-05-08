@@ -10,7 +10,7 @@
 #
 set -uo pipefail
 
-CB_VERSION="0.1.13"
+CB_VERSION="0.1.14"
 
 # Locate libraries - dev mode (repo) or installed mode
 _SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -61,27 +61,39 @@ Usage: certberus [GLOBAL] COMMAND [ARGS]
                            Recommended for first-time setup.
                            Alias: install
 
-  certberus auto           Plne automaticky podle /etc/certberus/config.env.
-                           Bez otazek, autodetekce domen, vhodne pro cron/CI.
+  certberus auto           Fully automatic: auto-detect + issue/renew.
+                           No prompts, suitable for cron/CI.
                            Alias: run
 
   ╭───────────────────────────────────────────────────────────────╮
-  │  PROVOZNI PRIKAZY                                             │
+  │  DIAGNOSTICS                                                    │
   ╰───────────────────────────────────────────────────────────────╯
 
-  status        Stav spravovanych certifikatu
-  expiry        Expirace certifikatu (certbot + mod_md)
-  doctor        Diagnostika (DNS, firewall, porty, moduly, verze)
-  discover      Zobraz domeny ktere miri na tento server
-  test-domain D Preflight (DNS+CAA+port 80+cert) pro jednu domenu
-  cert-info [D] Stav certu pro domenu (mod_md store, certbot, live HTTPS)
-  scan          Inventura X.509 na stroji (FS + configy + listenery)
-  renew         Vynutit obnovu (synonym pro auto/issue, idempotentni)
-  revoke D      Revokovat cert pro domenu
-  rollback      Vratit posledni snapshot
-  hooks         Sprava hook skriptu (list / show / run)
-  version       Verze
-  help          Tato napoveda
+  doctor        Environment diagnostics (DNS, firewall, ports, modules)
+  test-domain D Preflight for a domain (DNS, CAA, port 80/443, cert)
+  discover      Show domains pointing to this server
+
+  ╭───────────────────────────────────────────────────────────────╮
+  │  CERTIFICATES                                                   │
+  ╰───────────────────────────────────────────────────────────────╯
+
+  status        Overview: OS, webserver, installed modules
+  expiry        Expiry table for all certificates
+  cert-info [D] No argument: compact overview. With domain: details.
+  scan          Deep X.509 inventory across the entire machine (FS+configs+TLS)
+
+  ╭───────────────────────────────────────────────────────────────╮
+  │  MANAGEMENT                                                     │
+  ╰───────────────────────────────────────────────────────────────╯
+
+  renew         Renew existing certs (does not issue new ones)
+  revoke D      Revoke certificate for a domain
+  rollback      Restore the latest snapshot (offers restart)
+  snapshots     List saved snapshots
+  hooks         Manage hook scripts (list / show / run)
+  logs [N]      Last N lines of the log (default 50)
+  version       Version
+  help          This help
 
   ╭───────────────────────────────────────────────────────────────╮
   │  GLOBAL OPTIONS (usually not needed - use config.env)         │
@@ -135,7 +147,7 @@ cb_detect_webserver() {
 CB_CA_CLI=""; CB_WEBSERVER_CLI=""
 CLI_DOMAINS=""; CLI_EMAIL=""; CLI_EAB_KID=""; CLI_EAB_HMAC=""; CLI_ACME_URL=""
 CLI_WEBROOT=""; CLI_PORT80=""
-CLI_AUTO=0; CLI_FORCE=0
+CLI_AUTO=0
 CLI_SET_ARGS=()
 
 CB_CMD=""
@@ -176,7 +188,6 @@ parse_global() {
             -n|--dry-run) CB_DRY_RUN=1 ;;
             -v|--verbose) CB_VERBOSE=1 ;;
             --auto)  CLI_AUTO=1 ;;
-            --force) CLI_FORCE=1 ;;
             -V|--version) echo "certberus $CB_VERSION"; exit 0 ;;
             -h|--help) CB_CMD="help" ;;
             --) shift; REMAINING+=("$@"); return 0 ;;
@@ -216,6 +227,7 @@ build_forward_args() {
     if [[ -n "$CLI_WEBROOT" ]]; then
         case "$target_ws" in
             nginx|tomcat) out+=(--webroot "$CLI_WEBROOT") ;;
+            apache) cb_warn "--webroot nema efekt pro Apache mod_md (mod_md spravuje challenge sam)." ;;
             *) out+=(--set "CB_NGINX_WEBROOT=$CLI_WEBROOT" --set "CB_TOMCAT_ACME_WEBROOT=$CLI_WEBROOT") ;;
         esac
     fi
@@ -249,51 +261,41 @@ auto_discover_or_die() {
     mapfile -t discovered < <(cb_discover_all "$ws")
     cb_discover_load_stats
 
-    cb_log "Zdroje:  certbot=${CB_DISC_FROM_CERTBOT:-0}  webserver=${CB_DISC_FROM_WEBSERVER:-0}  https=${CB_DISC_FROM_HTTPS:-0}"
+    cb_log "Sources:  certbot=${CB_DISC_FROM_CERTBOT:-0}  mod_md=${CB_DISC_FROM_MOD_MD:-0}  webserver=${CB_DISC_FROM_WEBSERVER:-0}  https=${CB_DISC_FROM_HTTPS:-0}"
     if [[ -n "${CB_DISC_SKIPPED_NO_RESOLVE:-}" ]]; then
-        cb_warn "Preskoceno (nemiri na nas): $CB_DISC_SKIPPED_NO_RESOLVE"
+        cb_warn "Skipped (not pointing here): $CB_DISC_SKIPPED_NO_RESOLVE"
     fi
 
     if (( ${#discovered[@]} == 0 )); then
         local _ip; _ip="$(cb_server_ipv4 2>/dev/null || echo '?')"
-        local _host; _host="$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo 'mojedomena.example')"
-        cb_error "Zadna domena nenalezena, ktera by mirila na tento server."
-        cb_log "Overte:"
-        cb_log "  - DNS A/AAAA zaznamy domen miri na $_ip"
-        cb_log "  - Webserver (apache/nginx) ma nakonfigurovany VirtualHost se ServerName"
+        local _host; _host="$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo 'mydomain.example')"
+        cb_error "No domain found pointing to this server."
+        cb_log "Verify:"
+        cb_log "  - DNS A/AAAA records for your domains point to $_ip"
+        cb_log "  - Webserver (apache/nginx) has a VirtualHost with ServerName configured"
         cb_log ""
-        cb_log "Nebo zadejte domenu rucne:"
-        cb_log "  certberus auto --email <vas@email> --domain $_host"
-        cb_log "  certberus auto --email <vas@email> --domain a.example --domain b.example"
+        cb_log "Or specify a domain manually:"
+        cb_log "  certberus auto --email <your@email> --domain $_host"
+        cb_log "  certberus auto --email <your@email> --domain a.example --domain b.example"
         cb_log ""
-        cb_log "Tip: 'certberus interactive' provede pruvodcem (vytvori i config.env)."
+        cb_log "Tip: 'certberus interactive' walks you through the setup (creates config.env)."
         exit 2
     fi
 
-    cb_ok "Nalezeno ${#discovered[@]} domen, ktere miri na tento server:"
+    cb_ok "Found ${#discovered[@]} domains pointing to this server:"
     local d
     for d in "${discovered[@]}"; do cb_log "  - $d"; done
 
-    # Pokud --force => okamzite pouzij bez dotazu
-    if [[ "$CLI_FORCE" == "1" || "$CB_ASSUME_YES" == "1" ]]; then
-        cb_log "(--force / -y: bez potvrzeni)"
+    if [[ "$CB_ASSUME_YES" == "1" ]]; then
+        cb_log "(-y: no confirmation needed)"
     else
-        if ! cb_ask_yn "Pokracovat s temito domenami?" "Y/n"; then
-            cb_log "Zruseno uzivatelem."
+        if ! cb_ask_yn "Continue with these domains?" "Y/n"; then
+            cb_log "Cancelled by user."
             exit 0
         fi
     fi
 
-    # Naplnime CLI_DOMAINS
     CLI_DOMAINS="${discovered[*]}"
-
-    # --force sanity check: email musime mit (z CLI nebo config.env)
-    if [[ "$CLI_FORCE" == "1" ]]; then
-        local email="${CLI_EMAIL:-${CB_EMAIL:-}}"
-        if [[ -z "$email" || "$email" == *example.com* ]]; then
-            cb_die "--force: chybi validni --email (nebo CB_EMAIL v config.env)"
-        fi
-    fi
 }
 
 # -------- Command: discover --------
@@ -434,14 +436,15 @@ cmd_expiry() {
         fi
     fi
     # mod_md
-    if [[ -d /etc/apache2/md/domains ]]; then
+    local md_store; md_store="$(_cb_find_md_store 2>/dev/null || true)"
+    if [[ -n "$md_store" ]]; then
         cb_sep
-        cb_log "mod_md:"
+        cb_log "mod_md ($md_store):"
         any=1
         local d
-        for d in /etc/apache2/md/domains/*/; do
+        for d in "$md_store"/*/; do
             [[ -d "$d" ]] || continue
-            local name=$(basename "$d")
+            local name; name=$(basename "$d")
             local cert="$d/pubcert.pem"
             [[ ! -f "$cert" ]] && cert="$d/fullchain.pem"
             [[ -f "$cert" ]] || continue
@@ -457,7 +460,7 @@ _print_cert_expiry() {
     local name="$1" cert="$2"
     command -v openssl >/dev/null 2>&1 || return 0
     local end_s now_s days
-    local end; end=$(openssl x509 -enddate -noout -in "$cert" 2>/dev/null | sed 's/^notAfter=//')
+    local end; end=$(timeout 5 openssl x509 -enddate -noout -in "$cert" </dev/null 2>/dev/null | sed 's/^notAfter=//')
     [[ -z "$end" ]] && return 0
     end_s=$(date -d "$end" +%s 2>/dev/null) || return 0
     now_s=$(date +%s)
@@ -526,7 +529,6 @@ cmd_install() {
                 *) exit 0 ;;
             esac
         else
-            # Bez TTY vybereme co je aktivni
             case "$detected" in
                 *apache*) ws="apache" ;;
                 *nginx*)  ws="nginx" ;;
@@ -536,6 +538,56 @@ cmd_install() {
             cb_log "Selected: $ws"
         fi
     fi
+
+    # CA selection (if not already specified via --ca)
+    if [[ -z "$CB_CA_CLI" ]] && cb_has_tty && [[ "$CB_ASSUME_YES" != "1" ]]; then
+        echo
+        echo "Certificate Authority:"
+        echo "  1) Let's Encrypt      (free, standard choice)"
+        echo "  2) HARICA / CESNET TCS (requires EAB account from cm.harica.gr)"
+        echo "  3) ZeroSSL             (requires EAB account from zerossl.com)"
+        local ca_choice
+        read -r -p "Choice [1]: " ca_choice </dev/tty
+        case "${ca_choice:-1}" in
+            1) CB_CA_CLI="letsencrypt" ;;
+            2) CB_CA_CLI="harica" ;;
+            3) CB_CA_CLI="zerossl" ;;
+            *) CB_CA_CLI="letsencrypt" ;;
+        esac
+
+        if [[ "$CB_CA_CLI" == "harica" || "$CB_CA_CLI" == "zerossl" ]]; then
+            echo
+            cb_log "CA '$CB_CA_CLI' requires EAB (External Account Binding)."
+            if [[ -z "$CLI_EAB_KID" ]]; then
+                read -r -p "EAB Key ID: " CLI_EAB_KID </dev/tty
+                [[ -z "$CLI_EAB_KID" ]] && cb_die "EAB Key ID is required for $CB_CA_CLI"
+            fi
+            if [[ -z "$CLI_EAB_HMAC" ]]; then
+                CLI_EAB_HMAC=$(cb_ask_secret "EAB HMAC Key")
+                [[ -z "$CLI_EAB_HMAC" ]] && cb_die "EAB HMAC is required for $CB_CA_CLI"
+            fi
+            if [[ "$CB_CA_CLI" == "harica" && -z "$CLI_ACME_URL" ]]; then
+                read -r -p "ACME directory URL (e.g. https://acme.harica.gr/<ALIAS>/directory): " CLI_ACME_URL </dev/tty
+                [[ -z "$CLI_ACME_URL" ]] && cb_die "ACME URL is required for HARICA"
+            fi
+        fi
+    fi
+
+    # Nabidnout ulozeni do config.env
+    if cb_has_tty && [[ "$CB_ASSUME_YES" != "1" && ! -f "$CB_CONFIG_FILE" ]]; then
+        echo
+        if cb_ask_yn "Save settings to $CB_CONFIG_FILE for future automatic renewals (certberus auto)?" "Y/n"; then
+            local _email="${CLI_EMAIL:-}"
+            if [[ -z "$_email" ]]; then
+                read -r -p "Contact email for CA: " _email </dev/tty
+                [[ -n "$_email" ]] && CLI_EMAIL="$_email"
+            fi
+            cb_persist_config_skeleton "${CLI_EMAIL:-}" "" "${CB_CA_CLI:-letsencrypt}" \
+                "${CLI_EAB_KID:-}" "${CLI_EAB_HMAC:-}" "${CLI_ACME_URL:-}"
+            cb_ok "Ulozeno do $CB_CONFIG_FILE"
+        fi
+    fi
+
     cmd_issue_webserver "$ws"
 }
 
@@ -570,10 +622,7 @@ cmd_issue() {
 # Suitable for cron, systemd timer, CI:
 #   0 3 * * *  /usr/local/sbin/certberus auto >>/var/log/certberus/cron.log 2>&1
 cmd_auto() {
-    # Auto = vse non-interactive
     CB_ASSUME_YES=1
-    CLI_FORCE=1
-    # Pokud admin nezadal --domain ani CB_DOMAINS, autodetekuj
     if [[ -z "$CLI_DOMAINS" && -z "${CB_DOMAINS:-}" ]]; then
         CLI_AUTO=1
     fi
@@ -731,84 +780,138 @@ _cb_find_md_store() {
 }
 
 # certberus cert-info [DOMAIN]
-# Vypise zdroj a platnost certu pro domenu (mod_md, certbot, live HTTPS).
-# Bez DOMAIN: vypise vse co najde.
+# Without argument: compact table (domain | source | expiry | status).
+# With domain: detailed output including md.json, certbot, live HTTPS.
 cmd_cert_info() {
     local d="${REMAINING[1]:-}"
-    cb_banner "Certberus - cert-info${d:+ ($d)}"
 
+    if [[ -n "$d" ]]; then
+        _cert_info_detail "$d"
+    else
+        _cert_info_summary
+    fi
+}
+
+_cert_info_summary() {
+    cb_banner "Certberus — certificate overview"
+    local count=0
+    printf '  %-40s %-10s %6s  %s\n' "DOMAIN" "SOURCE" "DAYS" "STATUS"
+    printf '  %-40s %-10s %6s  %s\n' "$(printf '%0.s─' {1..40})" "$(printf '%0.s─' {1..10})" "$(printf '%0.s─' {1..6})" "$(printf '%0.s─' {1..8})"
+
+    # mod_md
     local store; store="$(_cb_find_md_store 2>/dev/null || true)"
     if [[ -n "$store" ]]; then
-        cb_log "mod_md store: $store"
-        local -a domains=()
-        if [[ -n "$d" ]]; then
-            [[ -d "$store/$d" ]] && domains=("$d")
-        else
-            local entry
-            for entry in "$store"/*/; do
-                [[ -d "$entry" ]] && domains+=("$(basename "$entry")")
-            done
-        fi
-        if (( ${#domains[@]} == 0 )); then
-            cb_log "  (zadne domeny v mod_md store${d:+ pro $d})"
-        else
-            local dom
-            for dom in "${domains[@]}"; do
-                cb_sep
-                cb_log "Domena: $dom"
-                local cert="$store/$dom/pubcert.pem"
-                local mdjson="$store/$dom/md.json"
-                if [[ -f "$cert" ]]; then
-                    cb_ok "  pubcert.pem existuje"
-                    openssl x509 -in "$cert" -noout -subject -issuer -dates 2>/dev/null | sed 's/^/    /'
-                else
-                    cb_warn "  pubcert.pem zatim neni (mod_md ho jeste nezadal nebo cekame na challenge)"
-                fi
-                if [[ -f "$mdjson" ]] && command -v jq >/dev/null 2>&1; then
-                    cb_log "  md.json state:"
-                    jq -r '{state, state_descr, renew, must_staple, cert?: (.cert | keys?), domains}' \
-                        "$mdjson" 2>/dev/null | sed 's/^/    /' || cat "$mdjson" | sed 's/^/    /'
-                elif [[ -f "$mdjson" ]]; then
-                    cb_log "  md.json (raw, nainstaluj jq pro hezky vypis):"
-                    head -20 "$mdjson" | sed 's/^/    /'
-                fi
-            done
-        fi
-        cb_sep
-    else
-        cb_log "mod_md store nenalezen (Apache mod_md neni v provozu)."
+        local entry
+        for entry in "$store"/*/; do
+            [[ -d "$entry" ]] || continue
+            local name; name=$(basename "$entry")
+            local cert="$entry/pubcert.pem"
+            [[ ! -f "$cert" ]] && cert="$entry/fullchain.pem"
+            if [[ -f "$cert" ]]; then
+                _cert_info_table_row "$name" "mod_md" "$cert" && count=$((count+1))
+            else
+                printf '  %-40s %-10s %6s  %s%s%s\n' "$name" "mod_md" "-" "${CB_C_YLW}PENDING${CB_C_RST}" "" ""
+                count=$((count+1))
+            fi
+        done
     fi
 
-    # certbot certy
-    if command -v certbot >/dev/null 2>&1; then
-        cb_log "certbot certy:"
-        if [[ -n "$d" ]]; then
-            certbot certificates --domain "$d" 2>/dev/null | sed 's/^/  /'
+    # certbot
+    local certs_dir=/etc/letsencrypt/live
+    if [[ -d "$certs_dir" ]]; then
+        local entry
+        for entry in "$certs_dir"/*/; do
+            [[ -d "$entry" ]] || continue
+            local name; name=$(basename "$entry")
+            local cert="$entry/cert.pem"
+            [[ -f "$cert" ]] || continue
+            _cert_info_table_row "$name" "certbot" "$cert" && count=$((count+1))
+        done
+    fi
+
+    echo
+    if (( count == 0 )); then
+        cb_warn "No certificates found."
+        cb_log "  Use 'certberus cert-info <domain>' for details."
+    else
+        cb_log "Total: $count certificate(s). For details: certberus cert-info <domain>"
+    fi
+}
+
+_cert_info_table_row() {
+    local name="$1" source="$2" cert="$3"
+    local end days color mark
+    end=$(timeout 5 openssl x509 -enddate -noout -in "$cert" </dev/null 2>/dev/null | sed 's/^notAfter=//')
+    if [[ -z "$end" ]]; then
+        printf '  %-40s %-10s %6s  %s\n' "$name" "$source" "?" "UNREADABLE"
+        return 0
+    fi
+    local end_s now_s
+    end_s=$(date -d "$end" +%s 2>/dev/null) || { printf '  %-40s %-10s %6s  %s\n' "$name" "$source" "?" "PARSE-ERR"; return 0; }
+    now_s=$(date +%s)
+    days=$(( (end_s - now_s) / 86400 ))
+    color="$CB_C_GRN"; mark="OK"
+    if (( days < 0 )); then color="$CB_C_RED"; mark="EXPIRED"
+    elif (( days < 7 )); then color="$CB_C_RED"; mark="CRITICAL"
+    elif (( days < 30 )); then color="$CB_C_YLW"; mark="WARN"
+    fi
+    printf '  %-40s %-10s %s%6d  [%-8s]%s\n' "$name" "$source" "$color" "$days" "$mark" "$CB_C_RST"
+    return 0
+}
+
+_cert_info_detail() {
+    local d="$1"
+    cb_banner "Certberus - cert-info: $d"
+
+    local store; store="$(_cb_find_md_store 2>/dev/null || true)"
+    if [[ -n "$store" && -d "$store/$d" ]]; then
+        cb_log "mod_md store: $store/$d"
+        local cert="$store/$d/pubcert.pem"
+        local mdjson="$store/$d/md.json"
+        if [[ -f "$cert" ]]; then
+            cb_ok "  pubcert.pem exists"
+            timeout 5 openssl x509 -in "$cert" -noout -subject -issuer -dates </dev/null 2>/dev/null | sed 's/^/    /'
         else
-            certbot certificates 2>/dev/null | sed 's/^/  /'
+            cb_warn "  pubcert.pem not yet present (mod_md hasn't requested it or challenge pending)"
         fi
+        if [[ -f "$mdjson" ]] && command -v jq >/dev/null 2>&1; then
+            cb_log "  md.json state:"
+            jq -r '{state, state_descr, renew, must_staple, cert?: (.cert | keys?), domains}' \
+                "$mdjson" 2>/dev/null | sed 's/^/    /' || head -20 "$mdjson" | sed 's/^/    /'
+        elif [[ -f "$mdjson" ]]; then
+            cb_log "  md.json (raw, install jq for pretty output):"
+            head -20 "$mdjson" | sed 's/^/    /'
+        fi
+        cb_sep
+    fi
+
+    # certbot
+    if command -v certbot >/dev/null 2>&1; then
+        cb_log "certbot:"
+        certbot certificates --domain "$d" 2>/dev/null | sed 's/^/  /'
         cb_sep
     fi
 
     # Live HTTPS test
-    if [[ -n "$d" ]]; then
-        cb_log "Live HTTPS na ${d}:443 :"
-        local live_cert
-        live_cert=$(echo | timeout 5 openssl s_client -servername "$d" -connect "$d:443" 2>/dev/null)
-        if [[ -n "$live_cert" ]]; then
-            printf '%s\n' "$live_cert" | openssl x509 -noout -subject -issuer -dates 2>/dev/null | sed 's/^/  /' \
-                || cb_warn "  s_client neuzavrel handshake (server moznasi jeste neni hotov)"
-        else
-            cb_warn "  Server nenavazal TLS spojeni (cert jeste neni nasazen?)"
-        fi
-        cb_sep
+    cb_log "Live HTTPS on ${d}:443:"
+    local live_cert
+    live_cert=$(echo | timeout 5 openssl s_client -servername "$d" -connect "$d:443" </dev/null 2>/dev/null)
+    if [[ -n "$live_cert" ]]; then
+        printf '%s\n' "$live_cert" | timeout 5 openssl x509 -noout -subject -issuer -dates -ext subjectAltName </dev/null 2>/dev/null | sed 's/^/  /' \
+            || cb_warn "  Handshake not completed"
+    else
+        cb_warn "  Server did not establish TLS connection (cert not yet deployed?)"
     fi
+    cb_sep
 
-    # Apache error.log poslednich 10 mod_md radku
+    # Apache error.log — relevant entries only
     if [[ -f /var/log/apache2/error.log ]]; then
-        cb_log "Posledni mod_md radky z /var/log/apache2/error.log :"
-        grep -i 'md\[' /var/log/apache2/error.log 2>/dev/null | tail -10 | sed 's/^/  /' \
-            || cb_log "  (zadne mod_md radky)"
+        local md_lines
+        md_lines=$(grep -i "md\[.*$d" /var/log/apache2/error.log 2>/dev/null | tail -5)
+        if [[ -n "$md_lines" ]]; then
+            cb_log "Last mod_md log entries for $d:"
+            echo "$md_lines" | sed 's/^/  /'
+        fi
     fi
 }
 
@@ -832,9 +935,14 @@ cmd_doctor() {
     if [[ -n "$ip" ]]; then
         cb_log "Testing port availability from the internet..."
         if timeout 5 bash -c "echo > /dev/tcp/$ip/80" 2>/dev/null; then
-            cb_ok "Port 80: dostupny"
+            cb_ok "Port 80: reachable (ACME HTTP-01)"
         else
-            cb_warn "Port 80: NEDOSTUPNY z internetu (nebo blokovan SG/firewall)"
+            cb_warn "Port 80: UNREACHABLE from internet (ACME HTTP-01 will fail without an open port)"
+        fi
+        if timeout 5 bash -c "echo > /dev/tcp/$ip/443" 2>/dev/null; then
+            cb_ok "Port 443: reachable (HTTPS)"
+        else
+            cb_warn "Port 443: UNREACHABLE from internet (clients cannot reach HTTPS)"
         fi
     fi
 
@@ -896,8 +1004,31 @@ cmd_rollback() {
     if [[ "$CB_DRY_RUN" == "0" ]]; then
         tar -xzf "$last" -C / && cb_ok "Extracted"
     fi
-    cb_log "Restart webserver je na Vas (systemctl restart apache2|nginx|tomcat9)"
     cb_run_hooks on-rollback
+
+    # Offer webserver restart
+    local ws_detected; ws_detected=$(cb_detect_webserver)
+    local restart_svc=""
+    case "$ws_detected" in
+        *apache*) restart_svc="apache2" ;;
+        *nginx*)  restart_svc="nginx" ;;
+        *tomcat*)
+            restart_svc=$(systemctl list-units --state=active 2>/dev/null | grep -oE 'tomcat[0-9]*\.service' | head -1)
+            restart_svc="${restart_svc:=tomcat9}"
+            ;;
+    esac
+    if [[ -n "$restart_svc" ]]; then
+        if cb_ask_yn "Restart $restart_svc to apply changes?" "Y/n"; then
+            if [[ "$CB_DRY_RUN" == "0" ]]; then
+                systemctl restart "$restart_svc" 2>/dev/null && cb_ok "$restart_svc restarted" \
+                    || cb_warn "Restart $restart_svc failed — check: systemctl status $restart_svc"
+            else
+                cb_log "[DRY-RUN] systemctl restart $restart_svc"
+            fi
+        else
+            cb_log "Don't forget to manually: systemctl restart $restart_svc"
+        fi
+    fi
 }
 
 cmd_hooks() {
@@ -932,6 +1063,107 @@ cmd_hooks() {
     esac
 }
 
+# -------- Command: renew --------
+# Renew ONLY existing certificates. Does not issue new ones.
+cmd_renew() {
+    CB_ASSUME_YES=1
+    cb_banner "Certberus — renew existing certificates"
+    local any=0
+
+    # certbot renew (only renews certs it already manages)
+    if command -v certbot >/dev/null 2>&1; then
+        local certs_dir=/etc/letsencrypt/live
+        if [[ -d "$certs_dir" ]] && find "$certs_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | grep -q .; then
+            any=1
+            cb_log "certbot: renewing existing certificates..."
+            if [[ "$CB_DRY_RUN" == "1" ]]; then
+                certbot renew --dry-run 2>&1 | tail -20 | sed 's/^/  /'
+            else
+                certbot renew 2>&1 | tail -20 | sed 's/^/  /'
+            fi
+            cb_ok "certbot renew completed."
+        fi
+    fi
+
+    # mod_md: graceful restart triggers internal renewal check
+    local md_store; md_store="$(_cb_find_md_store 2>/dev/null || true)"
+    if [[ -n "$md_store" ]] && find "$md_store" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | grep -q .; then
+        any=1
+        local apachectl=""
+        for c in apache2ctl apachectl httpd; do
+            command -v "$c" >/dev/null 2>&1 && { apachectl="$c"; break; }
+        done
+        if [[ -n "$apachectl" ]]; then
+            cb_log "mod_md: graceful restart (mod_md checks for renewal)..."
+            if [[ "$CB_DRY_RUN" == "0" ]]; then
+                "$apachectl" graceful 2>/dev/null && cb_ok "Apache graceful OK" \
+                    || cb_warn "Apache graceful failed"
+            else
+                cb_log "[DRY-RUN] $apachectl graceful"
+            fi
+        else
+            cb_warn "Apache not available — mod_md certs cannot be renewed manually."
+        fi
+    fi
+
+    if (( any == 0 )); then
+        cb_warn "No existing certificates to renew."
+        cb_log "  For first issuance, use 'certberus auto' or 'certberus interactive'."
+    else
+        cb_run_hooks post-renew
+    fi
+}
+
+# -------- Command: snapshots --------
+cmd_snapshots() {
+    cb_banner "Certberus — snapshots"
+    if [[ ! -d "$CB_BACKUP_DIR" ]]; then
+        cb_warn "Directory $CB_BACKUP_DIR does not exist (no snapshots yet)."
+        return 0
+    fi
+    local -a snaps=()
+    mapfile -t snaps < <(find "$CB_BACKUP_DIR" -maxdepth 1 -type f -name '*.tar.gz' -printf '%T@ %s %p\n' 2>/dev/null | sort -rn)
+    if (( ${#snaps[@]} == 0 )); then
+        cb_warn "No snapshots in $CB_BACKUP_DIR"
+        return 0
+    fi
+    printf '  %-20s %10s  %s\n' "DATE" "SIZE" "FILE"
+    printf '  %-20s %10s  %s\n' "$(printf '%0.s─' {1..20})" "$(printf '%0.s─' {1..10})" "$(printf '%0.s─' {1..40})"
+    local line
+    for line in "${snaps[@]}"; do
+        local ts_epoch sz path
+        ts_epoch="${line%% *}"
+        line="${line#* }"
+        sz="${line%% *}"
+        path="${line#* }"
+        local ts_human; ts_human=$(date -d "@${ts_epoch%.*}" '+%F %T' 2>/dev/null || echo "?")
+        local sz_human
+        if (( sz > 1048576 )); then
+            sz_human="$(( sz / 1048576 )) MB"
+        elif (( sz > 1024 )); then
+            sz_human="$(( sz / 1024 )) KB"
+        else
+            sz_human="${sz} B"
+        fi
+        printf '  %-20s %10s  %s\n' "$ts_human" "$sz_human" "$(basename "$path")"
+    done
+    echo
+    cb_log "Celkem: ${#snaps[@]} snapshot(u) v $CB_BACKUP_DIR"
+    cb_log "Rollback: certberus rollback  (pouzije nejnovejsi)"
+}
+
+# -------- Command: logs [N] --------
+cmd_logs() {
+    local n="${REMAINING[1]:-50}"
+    [[ "$n" =~ ^[0-9]+$ ]] || n=50
+    if [[ ! -f "$CB_LOG_FILE" ]]; then
+        cb_warn "Log file does not exist: $CB_LOG_FILE"
+        cb_log "  (certberus hasn't run yet or logs are in a different location)"
+        return 0
+    fi
+    tail -"$n" "$CB_LOG_FILE"
+}
+
 # -------- Main dispatch --------
 REMAINING=()
 parse_global "$@"
@@ -949,14 +1181,9 @@ case "$CMD" in
         if [[ "${CB_DRY_RUN:-0}" != "1" && "${CB_NO_LOCK:-0}" != "1" ]]; then
             CB_LOCK_FILE="${CB_LOCK_FILE:-/var/lock/certberus.lock}"
             if command -v flock >/dev/null 2>&1; then
-                # Pred `exec 200>` overime, ze umime do souboru zapisovat.
-                if ! ( umask 077; : 2>/dev/null >> "$CB_LOCK_FILE" ); then
-                    _alt="/tmp/certberus-${UID:-0}.lock"
-                    if ( umask 077; : 2>/dev/null >> "$_alt" ); then
-                        CB_LOCK_FILE="$_alt"
-                    else
-                        CB_LOCK_FILE=""
-                    fi
+                if ! ( umask 077; >> "$CB_LOCK_FILE" ) 2>/dev/null; then
+                    CB_LOCK_FILE="/tmp/certberus-${UID:-0}.lock"
+                    ( umask 077; >> "$CB_LOCK_FILE" ) 2>/dev/null || CB_LOCK_FILE=""
                 fi
                 if [[ -n "$CB_LOCK_FILE" ]]; then
                     # Preserve 0600 even on append (umask inside subshell doesn't propagate).
@@ -975,7 +1202,7 @@ case "$CMD" in
     interactive|install) cmd_install "$@" ;;
     auto|run)     cmd_auto "$@" ;;
     issue)       cmd_issue "$@" ;;
-    renew)       cmd_auto "$@" ;;  # renew = auto (certbot/mod_md idempotentni)
+    renew)       cmd_renew "$@" ;;
     status)      cmd_status "$@" ;;
     doctor)      cmd_doctor "$@" ;;
     discover)    cmd_discover "$@" ;;
@@ -985,7 +1212,9 @@ case "$CMD" in
     expiry|expires) cmd_expiry "$@" ;;
     revoke)      cmd_revoke "$@" ;;
     rollback)    cmd_rollback "$@" ;;
+    snapshots)   cmd_snapshots "$@" ;;
     hooks)       cmd_hooks "$@" ;;
+    logs|log)    cmd_logs "$@" ;;
     version|--version|-V) echo "certberus $CB_VERSION" ;;
     help|-h|--help|"") usage ;;
     *) echo "Unknown command: $CMD"; usage; exit 2 ;;
