@@ -129,6 +129,7 @@ stage_prepare() {
     cb_require_os debian ubuntu
     cb_hook_context nginx ""
     mkdir -p "$CB_LOG_DIR" "$CB_NGINX_WEBROOT" "$CB_CERTBOT_HOOK_DIR" "$CB_STATE_DIR" 2>/dev/null
+    chmod 0755 "$CB_NGINX_WEBROOT" 2>/dev/null || true
     cb_run_hooks pre-install
 }
 
@@ -187,14 +188,17 @@ stage_detect_existing() {
 
 stage_find_domains() {
     cb_sep
+    local _seen=""
     if [[ -n "$CB_DOMAINS" ]]; then
         for d in $CB_DOMAINS; do
-            cb_validate_domain "$d" || { cb_warn "Ignoruji: $d"; continue; }
+            cb_validate_domain "$d" || { cb_warn "Ignoring: $d"; continue; }
+            [[ " $_seen " == *" $d "* ]] && continue
             VALID_DOMAINS+=("$d")
+            _seen="$_seen $d"
         done
     else
-        # Detekce z nginx server_name direktiv
-        cb_log "Hledam domeny v nginx konfiguraci"
+        # Detect from nginx server_name directives
+        cb_log "Searching for domains in nginx configuration"
         local domains
         domains=$(nginx -T 2>/dev/null | \
             grep -E '^\s*server_name\s' | \

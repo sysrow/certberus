@@ -327,16 +327,17 @@ stage_find_domains() {
     cb_sep
 
     # Pokud admin predal domeny pres flagy/config, nebrouzdame vhosty
+    local _seen=""
     if [[ -n "$CB_DOMAINS" ]]; then
         for d in $CB_DOMAINS; do
             cb_validate_domain "$d" || { cb_warn "Ignoruji neplatnou domenu: $d"; continue; }
-            # I pri explicitnim zadani aspon varujme, kdyz DNS nemiri sem.
-            # Nezastavujeme se - admin to mohl predat zamerne (split-DNS, NAT).
+            [[ " $_seen " == *" $d "* ]] && continue
             if [[ "$d" != \** ]] && ! cb_domain_points_here "$d"; then
                 cb_warn "DNS A/AAAA pro $d nemiri na tento server - HTTP-01 challenge muze selhat."
                 cb_warn "  (Pokracuji - rezi-li bezet za NAT/LB, pouzij --skip-dns-check pro tise.)"
             fi
             VALID_DOMAINS+=("$d")
+            _seen="$_seen $d"
         done
         if (( ${#VALID_DOMAINS[@]} == 0 )); then
             cb_die "Zadna validni domena v CB_DOMAINS"
@@ -824,17 +825,28 @@ stage_post_issue_activate() {
     local domains_cert="$md_root/domains/$primary/pubcert.pem"
     local timeout="${CB_POST_ISSUE_TIMEOUT:-120}"
 
-    cb_log "Cekam na ACME issue (max ${timeout}s, sledujem $md_root/staging/$primary/)"
+    cb_log "Waiting for ACME issue (max ${timeout}s, watching staging/ and domains/)"
 
+    # mod_md on some versions (Ubuntu 24.04, Apache 2.4.58) needs a second
+    # graceful to even start the ACME job. We do it after a short wait.
+    local initial_grace=0
     local waited=0 step=3
     while (( waited < timeout )); do
-        # Cert uz je v domains (z minuleho behu) -> hotovo
-        [[ -s "$domains_cert" ]] && { cb_ok "Cert uz je v domains/ (z minuleho behu)"; return 0; }
-        # Cert je v staging -> druhy graceful ho aktivuje
+        [[ -s "$domains_cert" ]] && { cb_ok "Cert in domains/ — done"; return 0; }
         [[ -s "$staging_cert" ]] && break
+        if (( waited >= 10 && initial_grace == 0 )); then
+            cb_debug "No cert yet — trying another graceful"
+            "$APACHECTL" graceful >>"$CB_LOG_FILE" 2>&1 || true
+            initial_grace=1
+        fi
         sleep "$step"
         waited=$(( waited + step ))
     done
+
+    if [[ -s "$domains_cert" ]]; then
+        cb_ok "Cert v domains/ — hotovo"
+        return 0
+    fi
 
     if [[ ! -s "$staging_cert" ]]; then
         cb_warn "ACME job se nedokoncil za ${timeout}s. Az dorazi cert do staging,"

@@ -10,7 +10,7 @@
 #
 set -uo pipefail
 
-CB_VERSION="0.1.14"
+CB_VERSION="0.1.15"
 
 # Locate libraries - dev mode (repo) or installed mode
 _SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -99,7 +99,7 @@ Usage: certberus [GLOBAL] COMMAND [ARGS]
   │  GLOBAL OPTIONS (usually not needed - use config.env)         │
   ╰───────────────────────────────────────────────────────────────╯
 
-  --webserver apache|nginx|tomcat|auto     (default: auto)
+  --webserver apache|nginx|tomcat|certbot-only|auto  (default: auto)
   --ca letsencrypt|harica|zerossl          (default: letsencrypt)
   --domain D (repeatable)      --email E
   --eab-kid KID    --eab-hmac HMAC    --acme-url URL
@@ -226,7 +226,7 @@ build_forward_args() {
     [[ -n "$CLI_ACME_URL" ]] && out+=(--acme-url "$CLI_ACME_URL")
     if [[ -n "$CLI_WEBROOT" ]]; then
         case "$target_ws" in
-            nginx|tomcat) out+=(--webroot "$CLI_WEBROOT") ;;
+            nginx|tomcat|certbot-only) out+=(--webroot "$CLI_WEBROOT") ;;
             apache) cb_warn "--webroot nema efekt pro Apache mod_md (mod_md spravuje challenge sam)." ;;
             *) out+=(--set "CB_NGINX_WEBROOT=$CLI_WEBROOT" --set "CB_TOMCAT_ACME_WEBROOT=$CLI_WEBROOT") ;;
         esac
@@ -518,7 +518,8 @@ cmd_install() {
             echo "  1) Apache  (mod_md)"
             echo "  2) nginx   (certbot webroot)"
             echo "  3) Tomcat  (certbot webroot, 9+)"
-            echo "  4) Exit"
+            echo "  4) certbot-only  (Jetty, HAProxy, Postfix, ...)"
+            echo "  5) Exit"
             local choice
             read -r -p "Choice [1]: " choice </dev/tty
             choice="${choice:-1}"
@@ -526,6 +527,7 @@ cmd_install() {
                 1) ws="apache" ;;
                 2) ws="nginx" ;;
                 3) ws="tomcat" ;;
+                4) ws="certbot-only" ;;
                 *) exit 0 ;;
             esac
         else
@@ -717,6 +719,7 @@ cmd_issue_webserver() {
             ;;
         nginx)  script="$CB_WEBSERVERS_DIR/nginx-certbot.sh" ;;
         tomcat) script="$CB_WEBSERVERS_DIR/tomcat-certbot.sh" ;;
+        certbot-only) script="$CB_WEBSERVERS_DIR/certbot-only.sh" ;;
         *) cb_die "Unknown webserver: $ws" ;;
     esac
     [[ -x "$script" ]] || cb_die "Script not found: $script"
@@ -973,13 +976,22 @@ cmd_rollback() {
     if [[ ! -d "$CB_BACKUP_DIR" ]]; then
         cb_die "No snapshots in $CB_BACKUP_DIR"
     fi
-    local last
+    local last=""
     # Allow explicit snapshot path as positional arg
     if [[ -n "${REMAINING[1]:-}" && -f "${REMAINING[1]}" ]]; then
         last="${REMAINING[1]}"
     else
-        # Najdi nejnovejsi snapshot bez ohledu na nazev se znaky.
-        last=$(find "$CB_BACKUP_DIR" -maxdepth 1 -type f \( -name 'nginx-pre-*.tar.gz' -o -name 'apache2-pre-*.tar.gz' -o -name 'tomcat-pre-*.tar.gz' -o -name 'apache-md-pre-*.tar.gz' \) -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+        # Find newest snapshot (stat -c instead of find -printf for Alpine/busybox compatibility).
+        local -a _rb_files=()
+        mapfile -t _rb_files < <(find "$CB_BACKUP_DIR" -maxdepth 1 -type f \( -name 'nginx-pre-*.tar.gz' -o -name 'apache2-pre-*.tar.gz' -o -name 'tomcat-pre-*.tar.gz' -o -name 'apache-md-pre-*.tar.gz' -o -name 'certbot-only-pre-*.tar.gz' \) 2>/dev/null)
+        local _rb_newest_ts=0 _rb_f _rb_ts
+        for _rb_f in "${_rb_files[@]}"; do
+            _rb_ts=$(stat -c '%Y' "$_rb_f" 2>/dev/null) || continue
+            if (( _rb_ts > _rb_newest_ts )); then
+                _rb_newest_ts=$_rb_ts
+                last="$_rb_f"
+            fi
+        done
     fi
     [[ -z "$last" ]] && cb_die "No snapshots (.tar.gz)"
 
@@ -1191,7 +1203,7 @@ REMAINING=("$CMD" "${REMAINING[@]}")
 # flock on /var/lock/certberus.lock. Stale locks from crashed runs are released by OS
 # (flock(2) is bound to the process descriptor).
 case "$CMD" in
-    issue|renew|install|revoke|rollback)
+    issue|renew|install|revoke|rollback|auto|run|interactive)
         if [[ "${CB_DRY_RUN:-0}" != "1" && "${CB_NO_LOCK:-0}" != "1" ]]; then
             CB_LOCK_FILE="${CB_LOCK_FILE:-/var/lock/certberus.lock}"
             if command -v flock >/dev/null 2>&1; then

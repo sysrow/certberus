@@ -233,59 +233,59 @@ echo "=== Test 34: cb_apply_cli_set validates and exports ==="
     [[ "$CB_UNIT_SET" == "works" ]] || exit 1
     ( cb_apply_cli_set "PATH=/tmp" ) >/dev/null 2>&1 && exit 2
     exit 0
-) && _pass "cb_apply_cli_set validuje a exportuje" || _fail "cb_apply_cli_set problem"
+) && _pass "cb_apply_cli_set validates and exports" || _fail "cb_apply_cli_set problem"
 
-echo "=== Test 35: moduly zobrazuji nove CLI volby ==="
+echo "=== Test 35: modules show new CLI options ==="
 OUT=$(bash "$CERT_ROOT/webservers/nginx-certbot.sh" --help 2>&1)
-echo "$OUT" | grep -q -- '--webroot' && echo "$OUT" | grep -q -- '--set CB_X=Y' && _pass "nginx help ma --webroot/--set" || _fail
+echo "$OUT" | grep -q -- '--webroot' && echo "$OUT" | grep -q -- '--set CB_X=Y' && _pass "nginx help has --webroot/--set" || _fail
 OUT=$(bash "$CERT_ROOT/webservers/tomcat-certbot.sh" --help 2>&1)
-echo "$OUT" | grep -q -- '--port80' && echo "$OUT" | grep -q -- '--webroot' && echo "$OUT" | grep -q -- '--set CB_X=Y' && _pass "tomcat help ma port80/webroot/set" || _fail
+echo "$OUT" | grep -q -- '--port80' && echo "$OUT" | grep -q -- '--webroot' && echo "$OUT" | grep -q -- '--set CB_X=Y' && _pass "tomcat help has port80/webroot/set" || _fail
 
-echo "=== Test 36: retry politika je konfigurovatelna ==="
+echo "=== Test 36: retry policy is configurable ==="
 grep -q 'CB_RETRY_COUNT' "$CERT_ROOT/webservers/nginx-certbot.sh" && \
 grep -q 'CB_RETRY_DELAY' "$CERT_ROOT/webservers/nginx-certbot.sh" && \
-    _pass "nginx pouziva CB_RETRY_COUNT/DELAY" || _fail "nginx ignoruje retry config"
+    _pass "nginx uses CB_RETRY_COUNT/DELAY" || _fail "nginx ignores retry config"
 grep -q 'CB_RETRY_COUNT' "$CERT_ROOT/webservers/tomcat-certbot.sh" && \
 grep -q 'CB_RETRY_DELAY' "$CERT_ROOT/webservers/tomcat-certbot.sh" && \
-    _pass "tomcat pouziva CB_RETRY_COUNT/DELAY" || _fail "tomcat ignoruje retry config"
+    _pass "tomcat uses CB_RETRY_COUNT/DELAY" || _fail "tomcat ignores retry config"
 
 echo "=== Test 37: snapshots command ==="
 OUT=$("$CERTBERUS" snapshots 2>&1 || true)
-echo "$OUT" | grep -qiE 'snapshot|zadne' && _pass "snapshots funguje" || _fail
+echo "$OUT" | grep -qiE 'snapshot|No snapshot' && _pass "snapshots works" || _fail
 
-echo "=== Test 38: snapshots s daty ==="
-# Vytvorime dummy snapshot
+echo "=== Test 38: snapshots with data ==="
+# Create dummy snapshot
 mkdir -p "$CB_BACKUP_DIR"
 echo "dummy" | gzip > "$CB_BACKUP_DIR/apache2-pre-test-20250101-120000-0-1234.tar.gz"
 OUT=$("$CERTBERUS" snapshots 2>&1 || true)
-echo "$OUT" | grep -q 'apache2-pre-test' && _pass "snapshots vypise existujici" || _fail
+echo "$OUT" | grep -q 'apache2-pre-test' && _pass "snapshots lists existing" || _fail
 
 echo "=== Test 39: logs command ==="
-# certberus sam vytvori log pri startu, takze soubor uz existuje
+# certberus creates the log at startup, so the file already exists
 "$CERTBERUS" logs >/dev/null 2>&1; rc=$?
 [[ $rc -eq 0 ]] && _pass "logs exit 0" || _fail "logs exit $rc"
 
-echo "=== Test 40: logs command (s daty) ==="
+echo "=== Test 40: logs command (with data) ==="
 mkdir -p "$(dirname "$CB_LOG_FILE")"
-echo "[2025-01-01] [INFO] test radek" > "$CB_LOG_FILE"
+echo "[2025-01-01] [INFO] test line" > "$CB_LOG_FILE"
 OUT=$("$CERTBERUS" logs 2>&1 || true)
-echo "$OUT" | grep -q 'test radek' && _pass "logs zobrazuje data" || _fail
+echo "$OUT" | grep -q 'test line' && _pass "logs displays data" || _fail
 
-echo "=== Test 41: logs s argumentem N ==="
-for i in $(seq 1 10); do echo "radek $i" >> "$CB_LOG_FILE"; done
+echo "=== Test 41: logs with argument N ==="
+for i in $(seq 1 10); do echo "line $i" >> "$CB_LOG_FILE"; done
 OUT=$("$CERTBERUS" logs 3 2>&1 || true)
 LINE_COUNT=$(echo "$OUT" | wc -l)
-(( LINE_COUNT <= 4 )) && _pass "logs 3 vraci max 3 radky" || _fail "vraci $LINE_COUNT"
+(( LINE_COUNT <= 4 )) && _pass "logs 3 returns max 3 lines" || _fail "returns $LINE_COUNT"
 
-echo "=== Test 42: renew v prazdnem prostredi ==="
+echo "=== Test 42: renew in empty environment ==="
 OUT=$("$CERTBERUS" renew 2>&1 || true)
-echo "$OUT" | grep -qiE 'zadne|obnov' && _pass "renew bez certu varuje" || _fail
+echo "$OUT" | grep -qiE 'No existing|renew' && _pass "renew warns without certs" || _fail
 
-echo "=== Test 43: cert-info bez domeny (summary) ==="
+echo "=== Test 43: cert-info without domain (summary) ==="
 OUT=$("$CERTBERUS" cert-info 2>&1 || true)
-echo "$OUT" | grep -qiE 'prehled|DOMENA|zadne' && _pass "cert-info summary" || _fail
+echo "$OUT" | grep -qiE 'overview|DOMAIN|No' && _pass "cert-info summary" || _fail
 
-echo "=== Test 44: cert-info s domenou (detail) ==="
+echo "=== Test 44: cert-info with domain (detail) ==="
 OUT=$("$CERTBERUS" cert-info example.com 2>&1 || true)
 echo "$OUT" | grep -q 'cert-info: example.com' && _pass "cert-info detail banner" || _fail
 
@@ -294,6 +294,23 @@ OUT=$("$CERTBERUS" help 2>&1)
 echo "$OUT" | grep -q 'snapshots' && _pass "help: snapshots" || _fail
 echo "$OUT" | grep -q 'logs' && _pass "help: logs" || _fail
 echo "$OUT" | grep -q 'renew' && _pass "help: renew" || _fail
+
+echo "=== Test 46: certbot-only in --webserver ==="
+OUT=$("$CERTBERUS" help 2>&1)
+echo "$OUT" | grep -q 'certbot-only' && _pass "help mentions certbot-only" || _fail
+
+echo "=== Test 47: certbot-only module --help ==="
+OUT=$(bash "$CERT_ROOT/webservers/certbot-only.sh" --help 2>&1)
+echo "$OUT" | grep -q -- '--webroot' && echo "$OUT" | grep -q -- '--set CB_X=Y' && _pass "certbot-only help has --webroot/--set" || _fail
+
+echo "=== Test 48: certbot-only --webserver dispatch ==="
+OUT=$("$CERTBERUS" --webserver certbot-only --dry-run help 2>&1)
+echo "$OUT" | grep -q 'Usage' && _pass "certbot-only dispatch accepted" || _fail
+
+echo "=== Test 49: certbot-only retry configuration ==="
+grep -q 'CB_RETRY_COUNT' "$CERT_ROOT/webservers/certbot-only.sh" && \
+grep -q 'CB_RETRY_DELAY' "$CERT_ROOT/webservers/certbot-only.sh" && \
+    _pass "certbot-only uses CB_RETRY_COUNT/DELAY" || _fail "certbot-only ignores retry config"
 
 echo
 echo "==============================="
