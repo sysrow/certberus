@@ -257,10 +257,13 @@ stage_snapshot() {
 
 stage_find_domains() {
     cb_sep
+    local _seen=""
     if [[ -n "$CB_DOMAINS" ]]; then
         for d in $CB_DOMAINS; do
             cb_validate_domain "$d" || continue
+            [[ " $_seen " == *" $d "* ]] && continue
             VALID_DOMAINS+=("$d")
+            _seen="$_seen $d"
         done
     else
         # Extract <Host name="..."> and <Alias> from server.xml via python3 (safe)

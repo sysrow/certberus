@@ -295,6 +295,23 @@ echo "$OUT" | grep -q 'snapshots' && _pass "help: snapshots" || _fail
 echo "$OUT" | grep -q 'logs' && _pass "help: logs" || _fail
 echo "$OUT" | grep -q 'renew' && _pass "help: renew" || _fail
 
+echo "=== Test 46: certbot-only in --webserver ==="
+OUT=$("$CERTBERUS" help 2>&1)
+echo "$OUT" | grep -q 'certbot-only' && _pass "help mentions certbot-only" || _fail
+
+echo "=== Test 47: certbot-only module --help ==="
+OUT=$(bash "$CERT_ROOT/webservers/certbot-only.sh" --help 2>&1)
+echo "$OUT" | grep -q -- '--webroot' && echo "$OUT" | grep -q -- '--set CB_X=Y' && _pass "certbot-only help has --webroot/--set" || _fail
+
+echo "=== Test 48: certbot-only --webserver dispatch ==="
+OUT=$("$CERTBERUS" --webserver certbot-only --dry-run help 2>&1)
+echo "$OUT" | grep -q 'Usage' && _pass "certbot-only dispatch accepted" || _fail
+
+echo "=== Test 49: certbot-only retry configuration ==="
+grep -q 'CB_RETRY_COUNT' "$CERT_ROOT/webservers/certbot-only.sh" && \
+grep -q 'CB_RETRY_DELAY' "$CERT_ROOT/webservers/certbot-only.sh" && \
+    _pass "certbot-only uses CB_RETRY_COUNT/DELAY" || _fail "certbot-only ignores retry config"
+
 echo
 echo "==============================="
 echo "  PASS: $PASS   FAIL: $FAIL"

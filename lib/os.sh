@@ -79,7 +79,7 @@ cb_pkg_install() {
 cb_pkg_installed() {
     local p="$1"
     case "$CB_PKG_MGR" in
-        apt)    dpkg -s "$p" >/dev/null 2>&1 ;;
+        apt)    dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" ;;
         dnf|yum) rpm -q "$p" >/dev/null 2>&1 ;;
         zypper) rpm -q "$p" >/dev/null 2>&1 ;;
         apk)    apk info -e "$p" >/dev/null 2>&1 ;;

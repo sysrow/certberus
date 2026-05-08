@@ -308,7 +308,7 @@ cb_ensure_runtime_dirs() {
     # ocsp-errored, ocsp-renewed. Certberus choices: pre-issue, post-issue, post-reload,
     # on-failure (cb_run_hooks). We create both sets so they are ready immediately.
     local ev
-    for ev in pre-issue post-issue post-reload renewing renewed installed errored \
+    for ev in pre-issue post-issue post-reload post-renew renewing renewed installed errored \
               ocsp-renewed ocsp-errored on-failure deploy; do
         d="$CB_HOOKS_DIR/${ev}.d"
         [[ -d "$d" ]] || mkdir -p "$d" 2>/dev/null
@@ -346,7 +346,7 @@ EOF
     # execute /etc/certberus/hooks/<event>.d/*. Secret files inside have 0600.
     chmod 0755 "$CB_PREFIX" 2>/dev/null
     chmod 0755 "$CB_HOOKS_DIR" 2>/dev/null
-    for ev in pre-issue post-issue post-reload renewing renewed installed errored \
+    for ev in pre-issue post-issue post-reload post-renew renewing renewed installed errored \
               ocsp-renewed ocsp-errored on-failure deploy; do
         chmod 0755 "$CB_HOOKS_DIR/${ev}.d" 2>/dev/null
     done
