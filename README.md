@@ -52,7 +52,7 @@ curl -fsSLo /usr/local/sbin/certberus \
 chmod +x /usr/local/sbin/certberus
 
 sudo certberus auto --email admin@example.com --domain www.example.com
-# Cert appears in /var/lib/apache2/md/md/store/domains/www.example.com/ (10-60s, async).
+# Cert appears in /etc/apache2/md/domains/www.example.com/ (10-60s, async).
 sudo certberus cert-info www.example.com
 ```
 
@@ -251,7 +251,7 @@ Or build it yourself from source:
 ```bash
 git clone https://github.com/Tristram1337/certberus.git
 cd certberus
-./build/bundle.sh           # produces dist/certberus (~180 KB, single bash file)
+./build/bundle.sh           # produces dist/certberus (~260 KB, single bash file)
 
 sudo ./dist/certberus interactive
 # or copy it anywhere on your PATH:
@@ -270,7 +270,7 @@ to leave files in `/usr/local/lib`.
 
 ## Configure
 
-Edit `/etc/certberus/config.env` (5 mandatory values):
+Edit `/etc/certberus/config.env`:
 
 ```bash
 CB_EMAIL="admin@example.com"        # contact for the CA
@@ -295,18 +295,19 @@ The same values can be passed on the CLI via `--email`, `--ca`, `--domain`,
 
 ## What it does
 
-| | Apache (mod_md) | nginx (certbot) | Tomcat 9+ (certbot) |
-|---|:-:|:-:|:-:|
-| Let's Encrypt | yes | yes | yes |
-| HARICA / CESNET TCS (EAB) | yes | yes | yes |
-| ZeroSSL (EAB) | yes | yes | yes |
-| Staging (test CA) | yes | yes | yes |
-| Auto-detect domains | VirtualHost | server_name | Host name |
-| Snapshot before change | yes | yes | yes |
-| Rollback on error | yes | yes | atomic cert swap |
-| Firewall auto-open (80/443) | yes | yes | yes |
-| Auto-renewal | mod_md built-in | certbot.timer | certbot.timer |
-| Custom pre/post hooks | yes | yes | yes |
+| | Apache (mod_md) | nginx (certbot) | Tomcat 9+ (certbot) | certbot-only |
+|---|:-:|:-:|:-:|:-:|
+| Let's Encrypt | yes | yes | yes | yes |
+| HARICA / CESNET TCS (EAB) | yes | yes | yes | yes |
+| ZeroSSL (EAB) | yes | yes | yes | yes |
+| Staging (test CA) | yes | yes | yes | yes |
+| Auto-detect domains | VirtualHost | server_name | Host name | — |
+| Snapshot before change | yes | yes | yes | yes |
+| Rollback on error | yes | yes | atomic cert swap | yes |
+| Firewall auto-open (80/443) | yes | yes | yes | yes |
+| Auto-renewal | mod_md built-in | certbot.timer | certbot.timer | certbot.timer |
+| Custom pre/post hooks | yes | yes | yes | yes |
+| Works on RHEL/Fedora | — | — | — | **yes** |
 
 ---
 
@@ -336,7 +337,7 @@ certberus expiry        # expiration table for all managed certs
 certberus doctor        # DNS / firewall / port / module / version checks
 certberus discover      # which domains point at this server
 certberus test-domain D # full preflight (DNS + CAA + port 80 + cert) for one domain
-certberus renew         # alias for `auto` (idempotent)
+certberus renew         # trigger renewal of existing certs (certbot renew + mod_md graceful)
 certberus revoke D      # revoke a cert
 certberus rollback      # restore the last snapshot
 certberus hooks list    # list installed hooks
@@ -392,11 +393,11 @@ Tested end-to-end (staging + production certs, external SSL verification):
 
 | OS | certbot-only | Apache (mod_md) | nginx (certbot) | Tomcat (certbot) | SELinux |
 |---|:-:|:-:|:-:|:-:|:-:|
-| Debian 12 | **yes** | **yes** | **yes** | **yes** | — |
+| Debian 12 | **yes** | supported | **yes** | supported | — |
 | Debian 13 (trixie) | **yes** | **yes** | **yes** | **yes** | — |
-| Ubuntu 22.04 LTS | **yes** | **yes** | **yes** | **yes** | — |
-| Ubuntu 24.04 LTS | **yes** | **yes** | **yes** | **yes** | — |
-| Ubuntu 25.10 | **yes** | **yes** | **yes** | **yes** | — |
+| Ubuntu 22.04 LTS | **yes** | supported | **yes** | supported | — |
+| Ubuntu 24.04 LTS | **yes** | **yes** | supported | **yes** | — |
+| Ubuntu 25.10 | **yes** | supported | **yes** | supported | — |
 | Rocky Linux 8 | **yes** | — | — | — | Enforcing |
 | Rocky Linux 9 | **yes** | — | — | — | Enforcing |
 | AlmaLinux 8 | **yes** | — | — | — | Enforcing |
@@ -404,6 +405,10 @@ Tested end-to-end (staging + production certs, external SSL verification):
 | CentOS Stream 9 | **yes** | — | — | — | Enforcing |
 | Fedora 42 | **yes** | — | — | — | Enforcing |
 | Fedora 43 | **yes** | — | — | — | Enforcing |
+
+**yes** = tested end-to-end on real hardware. **supported** = code supports it (same
+codebase as tested OS versions), not yet verified on this specific version.
+— = not available (module gated to Debian/Ubuntu).
 
 Apache, nginx and Tomcat modules are gated to Debian/Ubuntu (they manage distro packages).
 `certbot-only` is universal and works on all supported OS. RHEL-family distros auto-install

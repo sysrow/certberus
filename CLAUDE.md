@@ -57,8 +57,9 @@ bash build/build.sh sync-version
 
 - `apache-md.sh` — Apache mod_md for Let's Encrypt
 - `apache-md-eab.sh` — Apache mod_md with EAB (HARICA/ZeroSSL)
-- `nginx-certbot.sh` — nginx with certbot
+- `nginx-certbot.sh` — nginx with certbot (webroot auto-detected from nginx config)
 - `tomcat-certbot.sh` — Tomcat 9+ with certbot
+- `certbot-only.sh` — universal module (standalone or webroot, works on all OS including RHEL/Fedora)
 
 **Bundle (`build/bundle.sh`):** Produces a single self-extracting bash file (`dist/certberus`) that embeds all lib/*.sh and webservers/*.sh as heredoc payloads, extracts to a tmpdir at runtime, and cleans up on exit.
 
