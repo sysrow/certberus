@@ -638,9 +638,10 @@ stage_issue_cert() {
         cb_ok "Certificate issued: ${group_domains[*]} (authenticator=$group_auth)"
         cb_hook_set_cert "/etc/letsencrypt/live/$primary_d/fullchain.pem" \
                         "/etc/letsencrypt/live/$primary_d/privkey.pem" \
-                        "$CB_CA"
+                        "$CB_CA" "certbot"
     done
 
+    export CA_SOURCE="certbot"
     cb_run_hooks post-issue
 }
 

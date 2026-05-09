@@ -10,7 +10,7 @@
 #
 set -uo pipefail
 
-CB_VERSION="0.1.16"
+CB_VERSION="0.1.17"
 
 # Locate libraries - dev mode (repo) or installed mode
 _SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -234,9 +234,13 @@ build_forward_args() {
     [[ -n "$CLI_PORT80" && "$target_ws" == "tomcat" ]] && out+=(--port80 "$CLI_PORT80")
     local kv
     for kv in "${CLI_SET_ARGS[@]}"; do out+=(--set "$kv"); done
-    # Dedup domain list (CLI + auto-discover muzou nedat to same)
+    # If the user explicitly passed --domain, use ONLY CLI domains
+    # and reset CB_DOMAINS from config.env (otherwise old domains get appended to new ones).
     local d
     declare -A _seen=()
+    if [[ -n "${CLI_DOMAINS// /}" ]]; then
+        out+=(--set "CB_DOMAINS=")
+    fi
     for d in $CLI_DOMAINS; do
         [[ -z "$d" ]] && continue
         [[ -n "${_seen[$d]:-}" ]] && continue
@@ -923,6 +927,7 @@ _cert_info_detail() {
 # X.509 inventory on the machine — dispatch to lib/scan.sh.
 cmd_scan() {
     cb_scan "$@"
+    return 0
 }
 
 cmd_doctor() {

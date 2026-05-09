@@ -459,6 +459,8 @@ EOF
             done <<<"$lst"
         fi
     fi
+
+    return 0
 }
 
 # Mini JSON encoder - escapes only \ and "

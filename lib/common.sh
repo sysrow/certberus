@@ -483,27 +483,30 @@ cb_certbot_issue() {
     [[ -f "$live" ]] && before_ts=$(stat -c %Y "$live" 2>/dev/null || echo 0)
     local start_epoch; start_epoch=$(date +%s)
     local out rc
-    # Zachytit stdout i stderr pro pozdejsi analyzu, ale soucasne je nechat proudit
+    # Capture stdout and stderr for later analysis, but also let them flow
     out=$(certbot "$@" 2>&1) ; rc=$?
     printf '%s\n' "$out"
-    # Pokud exit rc != 0 → neuspech
+    # If exit rc != 0 -> failure
     if (( rc != 0 )); then
         return "$rc"
     fi
-    # Exit 0 jeste neznamena uspech (certbot 4.x bug). Overujeme cert file.
+    # Dry-run does not create files - exit 0 from certbot is sufficient.
+    if [[ "${CB_DRY_RUN:-0}" == "1" ]] || printf '%s\n' "$out" | grep -qi "dry run"; then
+        return 0
+    fi
+    # Exit 0 does not yet mean success (certbot 4.x bug). Verify cert file.
     if [[ ! -f "$live" ]]; then
-        cb_error "certbot vratil 0, ale $live neexistuje"
-        # Detekce zname chyby
+        cb_error "certbot returned 0, but $live does not exist"
         if printf '%s' "$out" | grep -qE "Some challenges have failed|Unable to register|Domain .* failed"; then
             return 2
         fi
         return 3
     fi
     after_ts=$(stat -c %Y "$live" 2>/dev/null || echo 0)
-    # Pokud cert nebyl aktualizovan pri tomto volani, byl uz aktualni (OK).
-    # "Certificate not yet due for renewal" je validni pripad u renew.
+    # If cert was not updated during this invocation, it was already current (OK).
+    # "Certificate not yet due for renewal" is a valid case for renew.
     if (( after_ts < start_epoch )) && ! printf '%s' "$out" | grep -qE "not yet due for renewal|Certificate not yet due"; then
-        cb_warn "Cert $domain neni cerstvy (mtime $after_ts < start $start_epoch)"
+        cb_warn "Cert $domain is not fresh (mtime $after_ts < start $start_epoch)"
     fi
     return 0
 }

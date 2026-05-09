@@ -343,7 +343,8 @@ stage_issue_cert() {
     cb_ok "Certificate issued: ${VALID_DOMAINS[*]}"
     cb_hook_set_cert "/etc/letsencrypt/live/$primary/fullchain.pem" \
                     "/etc/letsencrypt/live/$primary/privkey.pem" \
-                    "$CB_CA"
+                    "$CB_CA" "certbot"
+    export CA_SOURCE="certbot"
     cb_run_hooks post-issue
 }
 

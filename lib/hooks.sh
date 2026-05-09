@@ -39,6 +39,7 @@ cb_run_hooks() {
     # Export context
     export CA_EVENT="$event"
     export CA_WEBSERVER="${CA_WEBSERVER:-}"
+    export CA_SOURCE="${CA_SOURCE:-}"
     export CA_DOMAIN_LIST="${CA_DOMAIN_LIST:-}"
     export CA_PRIMARY_DOMAIN="${CA_PRIMARY_DOMAIN:-}"
     export CA_CERT_PATH="${CA_CERT_PATH:-}"
@@ -91,14 +92,19 @@ cb_hook_context() {
     CA_WEBSERVER="$1"; shift
     CA_PRIMARY_DOMAIN="${1:-}"
     CA_DOMAIN_LIST="$*"
-    export CA_WEBSERVER CA_PRIMARY_DOMAIN CA_DOMAIN_LIST
+    case "$CA_WEBSERVER" in
+        apache) CA_SOURCE="mod_md" ;;
+        *)      CA_SOURCE="certbot" ;;
+    esac
+    export CA_WEBSERVER CA_PRIMARY_DOMAIN CA_DOMAIN_LIST CA_SOURCE
 }
 
 cb_hook_set_cert() {
     CA_CERT_PATH="$1"
     CA_KEY_PATH="$2"
     CA_CERT_ISSUER="${3:-}"
-    export CA_CERT_PATH CA_KEY_PATH CA_CERT_ISSUER
+    CA_SOURCE="${4:-${CA_SOURCE:-certbot}}"
+    export CA_CERT_PATH CA_KEY_PATH CA_CERT_ISSUER CA_SOURCE
 }
 
 # -------- mod_md adapter --------
