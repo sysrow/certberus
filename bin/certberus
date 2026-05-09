@@ -228,7 +228,6 @@ build_forward_args() {
         case "$target_ws" in
             nginx|tomcat|certbot-only) out+=(--webroot "$CLI_WEBROOT") ;;
             apache) cb_warn "--webroot nema efekt pro Apache mod_md (mod_md spravuje challenge sam)." ;;
-            *) out+=(--set "CB_NGINX_WEBROOT=$CLI_WEBROOT" --set "CB_TOMCAT_ACME_WEBROOT=$CLI_WEBROOT") ;;
         esac
     fi
     [[ -n "$CLI_PORT80" && "$target_ws" == "tomcat" ]] && out+=(--port80 "$CLI_PORT80")

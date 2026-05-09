@@ -290,30 +290,6 @@ cb_apache_fix_sites_enabled_regular_files() {
     echo "$fixed"
 }
 
-# -------- Apache: orphan symlinky v conf-enabled (cil neexistuje v available) --------
-# Differs from broken symlink: symlink target may exist but outside the available directory.
-# Toto jsou symlinky s nevalidni strukturou, certberus nabidne odstraneni.
-cb_apache_find_orphan_enabled() {
-    local root="${1:-/etc/apache2}"
-    [[ -d "$root" ]] || return 0
-    local dir base real avail
-    for dir in sites-enabled conf-enabled mods-enabled; do
-        [[ -d "$root/$dir" ]] || continue
-        avail="${dir%-enabled}-available"
-        while IFS= read -r f; do
-            [[ -L "$f" ]] || continue
-            real=$(readlink -f "$f" 2>/dev/null)
-            base=$(basename "$f")
-            # Ciste orphan: symlink cil je ve FS, ale ne v prislusnem available
-            if [[ -e "$real" && "$real" != "$root/$avail/$base" ]]; then
-                # Mohla by byt validni absolutni cesta (e.g. /etc/letsencrypt/conf)
-                # - rozlisujeme: kdyz neni v /etc/apache2/$avail/, warninujeme
-                printf '%s\t%s\n' "$f" "$real"
-            fi
-        done < <(find "$root/$dir" -maxdepth 1 -type l 2>/dev/null)
-    done
-}
-
 # -------- Apache master check --------
 # Returns: 0 = OK, 1 = warning (fixable), 2 = fatal
 cb_preflight_apache() {
