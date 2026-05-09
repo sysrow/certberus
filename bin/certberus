@@ -10,7 +10,7 @@
 #
 set -uo pipefail
 
-CB_VERSION="0.1.17"
+CB_VERSION="0.1.18"
 
 # Locate libraries - dev mode (repo) or installed mode
 _SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -99,7 +99,7 @@ Usage: certberus [GLOBAL] COMMAND [ARGS]
   │  GLOBAL OPTIONS (usually not needed - use config.env)         │
   ╰───────────────────────────────────────────────────────────────╯
 
-  --webserver apache|nginx|tomcat|certbot-only|auto  (default: auto)
+  --webserver apache|nginx|tomcat|jetty|caddy|certbot-only|auto  (default: auto)
   --ca letsencrypt|harica|zerossl          (default: letsencrypt)
   --domain D (repeatable)      --email E
   --eab-kid KID    --eab-hmac HMAC    --acme-url URL
@@ -131,14 +131,21 @@ cb_detect_webserver() {
     if systemctl is-active --quiet nginx 2>/dev/null; then
         [[ -z "$active" ]] && active="nginx" || active="$active+nginx"
     fi
-    if systemctl list-units --state=active 2>/dev/null | grep -qE '^\s*tomcat[0-9]*\.service'; then
+    if systemctl list-units --state=active 2>/dev/null | grep -E '^\s*tomcat[0-9]*\.service'; then >/dev/null
         [[ -z "$active" ]] && active="tomcat" || active="$active+tomcat"
+    fi
+    if systemctl list-units --state=active 2>/dev/null | grep -E '^\s*(jetty|shibboleth-idp)[0-9]*\.service'; then >/dev/null
+        [[ -z "$active" ]] && active="jetty" || active="$active+jetty"
+    fi
+    if systemctl is-active --quiet caddy 2>/dev/null; then
+        [[ -z "$active" ]] && active="caddy" || active="$active+caddy"
     fi
 
     if [[ -z "$active" ]]; then
         # Fallback: what is installed but not active
-        cb_pkg_installed apache2 && active="apache(stopped)"
+        { cb_pkg_installed apache2 || cb_pkg_installed httpd; } && active="apache(stopped)"
         cb_pkg_installed nginx   && active="${active:+$active,}nginx(stopped)"
+        cb_pkg_installed caddy   && active="${active:+$active,}caddy(stopped)"
     fi
     printf '%s' "$active"
 }
@@ -226,8 +233,9 @@ build_forward_args() {
     [[ -n "$CLI_ACME_URL" ]] && out+=(--acme-url "$CLI_ACME_URL")
     if [[ -n "$CLI_WEBROOT" ]]; then
         case "$target_ws" in
-            nginx|tomcat|certbot-only) out+=(--webroot "$CLI_WEBROOT") ;;
-            apache) cb_warn "--webroot nema efekt pro Apache mod_md (mod_md spravuje challenge sam)." ;;
+            nginx|tomcat|jetty|certbot-only) out+=(--webroot "$CLI_WEBROOT") ;;
+            apache) cb_warn "--webroot has no effect for Apache mod_md (mod_md manages the challenge itself)." ;;
+            caddy) cb_warn "--webroot has no effect for Caddy (Caddy manages the challenge itself)." ;;
         esac
     fi
     [[ -n "$CLI_PORT80" && "$target_ws" == "tomcat" ]] && out+=(--port80 "$CLI_PORT80")
@@ -311,11 +319,11 @@ cmd_discover() {
     cb_log "Sources:  certbot=${CB_DISC_FROM_CERTBOT:-0}  mod_md=${CB_DISC_FROM_MOD_MD:-0}  webserver=${CB_DISC_FROM_WEBSERVER:-0}  https=${CB_DISC_FROM_HTTPS:-0}"
     cb_sep
     if (( ${#discovered[@]} == 0 )); then
-        cb_warn "Zadna domena nesmeruje DNS A/AAAA na tento server."
-        cb_log "  Tipy:"
-        cb_log "    - zkontroluj 'apache2ctl -S' / 'nginx -T' (jsou tam ServerName?)"
-        cb_log "    - zkontroluj 'ls /etc/apache2/md/{domains,staging}/' (mod_md store)"
-        cb_log "    - DNS zaznam musi A/AAAA mirit na tento stroj (test: certberus test-domain DOMENA)"
+        cb_warn "No domain has DNS A/AAAA pointing to this server."
+        cb_log "  Tips:"
+        cb_log "    - check 'apachectl -S' / 'nginx -T' (are ServerName entries present?)"
+        cb_log "    - check mod_md store: /etc/apache2/md/ or /etc/httpd/md/"
+        cb_log "    - DNS record must A/AAAA point to this machine (test: certberus test-domain DOMAIN)"
     else
         cb_ok "Candidates for certificate issuance:"
         local d
@@ -378,7 +386,7 @@ cmd_test_domain() {
             printf "HEAD / HTTP/1.0\r\nHost: %s\r\n\r\n" "'"$d"'" >&3
             head -1 <&3
             exec 3>&-
-        ' 2>/dev/null | grep -q 'HTTP'; then
+        ' 2>/dev/null | grep 'HTTP'; then >/dev/null
             cb_ok "Port 80: reachable (ACME HTTP-01 should work)"
         else
             cb_warn "Port 80: unreachable from outside — ACME HTTP-01 will fail"
@@ -495,13 +503,17 @@ cmd_revoke() {
         return 0
     fi
     # mod_md: no revoke API, just remove domain (won't regenerate on next reload)
-    if [[ -d "/etc/apache2/md/domains/$d" ]]; then
+    local _md_root=""
+    for _mdr in /etc/apache2/md /etc/httpd/md; do
+        [[ -d "$_mdr/domains/$d" ]] && { _md_root="$_mdr"; break; }
+    done
+    if [[ -n "$_md_root" ]]; then
         cb_warn "mod_md has no API for ACME revocation. Can only remove the domain from mod_md records."
         cb_log "For actual revocation, use another ACME client with the same account key."
         cb_ask_yn "Remove $d from mod_md?" "N/y" || exit 0
         if [[ "$CB_DRY_RUN" == "0" ]]; then
-            rm -rf "/etc/apache2/md/domains/$d" "/etc/apache2/md/staging/$d"
-            cb_ok "Odstraneno. Nezapomen upravit /etc/apache2/conf-available/certberus-md.conf"
+            rm -rf "$_md_root/domains/$d" "$_md_root/staging/$d"
+            cb_ok "Removed. Don't forget to update certberus-md.conf"
         fi
         return 0
     fi
@@ -517,12 +529,14 @@ cmd_install() {
         cb_log "Detected webserver(s): ${detected:-none}"
         if cb_has_tty && [[ "$CB_ASSUME_YES" != "1" ]]; then
             echo
-            echo "Jaky webserver chcete nastavit?"
-            echo "  1) Apache  (mod_md)"
+            echo "Which webserver do you want to set up?"
+            echo "  1) Apache  (mod_md — native ACME)"
             echo "  2) nginx   (certbot webroot)"
-            echo "  3) Tomcat  (certbot webroot, 9+)"
-            echo "  4) certbot-only  (Jetty, HAProxy, Postfix, ...)"
-            echo "  5) Exit"
+            echo "  3) Tomcat  (certbot + PEM connector, 9+)"
+            echo "  4) Jetty   (certbot + PKCS12 keystore)"
+            echo "  5) Caddy   (native ACME — zero-config TLS)"
+            echo "  6) certbot-only  (HAProxy, Postfix, ...)"
+            echo "  7) Exit"
             local choice
             read -r -p "Choice [1]: " choice </dev/tty
             choice="${choice:-1}"
@@ -530,7 +544,9 @@ cmd_install() {
                 1) ws="apache" ;;
                 2) ws="nginx" ;;
                 3) ws="tomcat" ;;
-                4) ws="certbot-only" ;;
+                4) ws="jetty" ;;
+                5) ws="caddy" ;;
+                6) ws="certbot-only" ;;
                 *) exit 0 ;;
             esac
         else
@@ -538,6 +554,8 @@ cmd_install() {
                 *apache*) ws="apache" ;;
                 *nginx*)  ws="nginx" ;;
                 *tomcat*) ws="tomcat" ;;
+                *jetty*)  ws="jetty" ;;
+                *caddy*)  ws="caddy" ;;
                 *) cb_die "No active webserver detected. Specify --webserver." ;;
             esac
             cb_log "Selected: $ws"
@@ -603,12 +621,14 @@ cmd_issue() {
     if [[ "$ws" == "auto" ]]; then
         local d; d=$(cb_detect_webserver)
         if [[ "$d" == *+* ]]; then
-            cb_die "Detekovano vice webserveru ($d). Vyber jeden: --webserver apache|nginx|tomcat (nebo CB_WEBSERVER v config.env)."
+            cb_die "Multiple webservers detected ($d). Choose one: --webserver apache|nginx|tomcat|jetty|caddy (or CB_WEBSERVER in config.env)."
         fi
         case "$d" in
             *apache*) ws="apache" ;;
             *nginx*)  ws="nginx" ;;
             *tomcat*) ws="tomcat" ;;
+            *jetty*)  ws="jetty" ;;
+            *caddy*)  ws="caddy" ;;
             *) cb_die "Cannot detect webserver. Use --webserver." ;;
         esac
         CB_WEBSERVER_CLI="$ws"
@@ -723,6 +743,8 @@ cmd_issue_webserver() {
             ;;
         nginx)  script="$CB_WEBSERVERS_DIR/nginx-certbot.sh" ;;
         tomcat) script="$CB_WEBSERVERS_DIR/tomcat-certbot.sh" ;;
+        jetty)  script="$CB_WEBSERVERS_DIR/jetty-certbot.sh" ;;
+        caddy)  script="$CB_WEBSERVERS_DIR/caddy.sh" ;;
         certbot-only) script="$CB_WEBSERVERS_DIR/certbot-only.sh" ;;
         *) cb_die "Unknown webserver: $ws" ;;
     esac
@@ -763,11 +785,15 @@ cmd_status() {
     fi
 
     # mod_md
-    if [[ -d /etc/apache2/md/domains ]]; then
+    local _md_domains_dir=""
+    for _mdp in /etc/apache2/md/domains /etc/httpd/md/domains; do
+        [[ -d "$_mdp" ]] && { _md_domains_dir="$_mdp"; break; }
+    done
+    if [[ -n "$_md_domains_dir" ]]; then
         cb_sep
         cb_log "mod_md state:"
         command -v a2query >/dev/null && a2query -m md 2>&1 | sed 's/^/  /'
-        ls -la /etc/apache2/md/domains/ 2>/dev/null | sed 's/^/  /'
+        ls -la "$_md_domains_dir/" 2>/dev/null | sed 's/^/  /'
     fi
 }
 
@@ -777,12 +803,15 @@ _cb_find_md_store() {
     for p in /var/lib/apache2/md/md/store/domains \
              /etc/apache2/md/md/store/domains \
              /etc/apache2/md/domains \
-             /var/cache/apache2/md/domains; do
+             /var/cache/apache2/md/domains \
+             /var/lib/httpd/md/md/store/domains \
+             /etc/httpd/md/md/store/domains \
+             /etc/httpd/md/domains \
+             /var/cache/httpd/md/domains; do
         [[ -d "$p" ]] && { printf '%s' "$p"; return 0; }
     done
-    # Posledni sance: najit kdekoliv pod /var nebo /etc
     local found
-    found=$(find /var/lib/apache2 /etc/apache2 -maxdepth 6 -type d -name domains -path '*md*' 2>/dev/null | head -1)
+    found=$(find /var/lib/apache2 /etc/apache2 /var/lib/httpd /etc/httpd -maxdepth 6 -type d -name domains -path '*md*' 2>/dev/null | head -1)
     [[ -n "$found" ]] && { printf '%s' "$found"; return 0; }
     return 1
 }
@@ -913,9 +942,13 @@ _cert_info_detail() {
     cb_sep
 
     # Apache error.log — relevant entries only
-    if [[ -f /var/log/apache2/error.log ]]; then
+    local _errlog=""
+    for _el in /var/log/apache2/error.log /var/log/httpd/error_log; do
+        [[ -f "$_el" ]] && { _errlog="$_el"; break; }
+    done
+    if [[ -n "$_errlog" ]]; then
         local md_lines
-        md_lines=$(grep -i "md\[.*$d" /var/log/apache2/error.log 2>/dev/null | tail -5)
+        md_lines=$(grep -i "md\[.*$d" "$_errlog" 2>/dev/null | tail -5)
         if [[ -n "$md_lines" ]]; then
             cb_log "Last mod_md log entries for $d:"
             echo "$md_lines" | sed 's/^/  /'
@@ -988,7 +1021,7 @@ cmd_rollback() {
     else
         # Find newest snapshot (stat -c instead of find -printf for Alpine/busybox compatibility).
         local -a _rb_files=()
-        mapfile -t _rb_files < <(find "$CB_BACKUP_DIR" -maxdepth 1 -type f \( -name 'nginx-pre-*.tar.gz' -o -name 'apache2-pre-*.tar.gz' -o -name 'tomcat-pre-*.tar.gz' -o -name 'apache-md-pre-*.tar.gz' -o -name 'certbot-only-pre-*.tar.gz' \) 2>/dev/null)
+        mapfile -t _rb_files < <(find "$CB_BACKUP_DIR" -maxdepth 1 -type f \( -name 'nginx-pre-*.tar.gz' -o -name 'apache2-pre-*.tar.gz' -o -name 'httpd-pre-*.tar.gz' -o -name 'tomcat-pre-*.tar.gz' -o -name 'apache-md-pre-*.tar.gz' -o -name 'certbot-only-pre-*.tar.gz' -o -name 'jetty-pre-*.tar.gz' -o -name 'caddy-pre-*.tar.gz' \) 2>/dev/null)
         local _rb_newest_ts=0 _rb_f _rb_ts
         for _rb_f in "${_rb_files[@]}"; do
             _rb_ts=$(stat -c '%Y' "$_rb_f" 2>/dev/null) || continue
@@ -1028,12 +1061,20 @@ cmd_rollback() {
     local ws_detected; ws_detected=$(cb_detect_webserver)
     local restart_svc=""
     case "$ws_detected" in
-        *apache*) restart_svc="apache2" ;;
+        *apache*)
+            if systemctl is-active --quiet httpd 2>/dev/null; then restart_svc="httpd"
+            else restart_svc="apache2"; fi
+            ;;
         *nginx*)  restart_svc="nginx" ;;
         *tomcat*)
             restart_svc=$(systemctl list-units --state=active 2>/dev/null | grep -oE 'tomcat[0-9]*\.service' | head -1)
             restart_svc="${restart_svc:=tomcat9}"
             ;;
+        *jetty*)
+            restart_svc=$(systemctl list-units --state=active 2>/dev/null | grep -oE '(jetty|shibboleth-idp)[0-9]*\.service' | head -1)
+            restart_svc="${restart_svc:=jetty}"
+            ;;
+        *caddy*) restart_svc="caddy" ;;
     esac
     if [[ -n "$restart_svc" ]]; then
         if cb_ask_yn "Restart $restart_svc to apply changes?" "Y/n"; then
@@ -1092,7 +1133,7 @@ cmd_renew() {
     # certbot renew (only renews certs it already manages)
     if command -v certbot >/dev/null 2>&1; then
         local certs_dir=/etc/letsencrypt/live
-        if [[ -d "$certs_dir" ]] && find "$certs_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | grep -q .; then
+        if [[ -d "$certs_dir" ]] && find "$certs_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | grep .; then >/dev/null
             any=1
             cb_log "certbot: renewing existing certificates..."
             if [[ "$CB_DRY_RUN" == "1" ]]; then
@@ -1106,7 +1147,7 @@ cmd_renew() {
 
     # mod_md: graceful restart triggers internal renewal check
     local md_store; md_store="$(_cb_find_md_store 2>/dev/null || true)"
-    if [[ -n "$md_store" ]] && find "$md_store" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | grep -q .; then
+    if [[ -n "$md_store" ]] && find "$md_store" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | grep .; then >/dev/null
         any=1
         local apachectl=""
         for c in apache2ctl apachectl httpd; do

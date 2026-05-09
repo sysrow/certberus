@@ -223,7 +223,7 @@ HOOK_EOF
 
 _cb_port80_in_use() {
     if command -v ss >/dev/null 2>&1; then
-        ss -ltn 'sport = :80' 2>/dev/null | grep -q ':80' && return 0
+        ss -ltn 'sport = :80' 2>/dev/null | grep ':80' && return 0 >/dev/null
     elif command -v fuser >/dev/null 2>&1; then
         fuser 80/tcp >/dev/null 2>&1 && return 0
     fi
@@ -349,10 +349,10 @@ stage_issue_cert() {
 }
 
 stage_enable_timer() {
-    if systemctl list-unit-files 2>/dev/null | grep -q '^certbot\.timer'; then
-        systemctl enable --now certbot.timer >/dev/null 2>&1 && cb_ok "certbot.timer aktivovan"
-    elif systemctl list-unit-files 2>/dev/null | grep -q '^snap.certbot.renew.timer'; then
-        systemctl enable --now snap.certbot.renew.timer >/dev/null 2>&1 && cb_ok "snap certbot.renew.timer"
+    if systemctl list-unit-files 2>/dev/null | grep '^certbot\.timer'; then >/dev/null
+        systemctl enable --now certbot.timer >/dev/null 2>&1 && cb_ok "certbot.timer enabled"
+    elif systemctl list-unit-files 2>/dev/null | grep '^snap.certbot.renew.timer'; then >/dev/null
+        systemctl enable --now snap.certbot.renew.timer >/dev/null 2>&1 && cb_ok "snap certbot.renew.timer enabled"
     fi
 }
 

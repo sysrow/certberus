@@ -74,7 +74,7 @@ HEADER
     done
 
     # Webserver payloads
-    WS_FILES=(apache-md.sh apache-md-eab.sh nginx-certbot.sh tomcat-certbot.sh certbot-only.sh)
+    WS_FILES=(apache-md.sh apache-md-eab.sh nginx-certbot.sh tomcat-certbot.sh certbot-only.sh jetty-certbot.sh caddy.sh)
     for f in "${WS_FILES[@]}"; do
         [[ -f "$SRC_WS/$f" ]] || { echo "Missing $SRC_WS/$f" >&2; exit 2; }
         label="WS_$(echo "$f" | tr 'a-z.-' 'A-Z__')"
@@ -129,6 +129,8 @@ __cb_payload_WS_APACHE_MD_EAB_SH  > "$CB_BUNDLE_TMP/webservers/apache-md-eab.sh"
 __cb_payload_WS_NGINX_CERTBOT_SH  > "$CB_BUNDLE_TMP/webservers/nginx-certbot.sh"
 __cb_payload_WS_TOMCAT_CERTBOT_SH > "$CB_BUNDLE_TMP/webservers/tomcat-certbot.sh"
 __cb_payload_WS_CERTBOT_ONLY_SH  > "$CB_BUNDLE_TMP/webservers/certbot-only.sh"
+__cb_payload_WS_JETTY_CERTBOT_SH > "$CB_BUNDLE_TMP/webservers/jetty-certbot.sh"
+__cb_payload_WS_CADDY_SH         > "$CB_BUNDLE_TMP/webservers/caddy.sh"
 chmod +x "$CB_BUNDLE_TMP/webservers/"*.sh
 
 # Tell the orchestrator where to find everything (overrides path autodetection).

@@ -128,7 +128,7 @@ _cb_tomcat_restore_root_context() {
     local ctx_dir="$TOMCAT_CONF_DIR/Catalina/localhost"
     local root_xml="$ctx_dir/ROOT.xml"
     [[ -f "$root_xml" ]] || return 0
-    if grep -q 'certberus' "$root_xml" 2>/dev/null || grep -q 'docBase="/var/www/acme"' "$root_xml" 2>/dev/null; then
+    if grep 'certberus' "$root_xml" 2>/dev/null || grep -q 'docBase="/var/www/acme"' "$root_xml" 2>/dev/null; then >/dev/null
         if [[ -n "$_CB_TOMCAT_ORIG_ROOT_XML" && -f "$_CB_TOMCAT_ORIG_ROOT_XML" ]]; then
             mv "$_CB_TOMCAT_ORIG_ROOT_XML" "$root_xml"
             cb_ok "ROOT.xml restored from backup"
@@ -144,7 +144,6 @@ _cb_tomcat_restore_root_context() {
 stage_prepare() {
     cb_banner "Certberus / Tomcat 9+ / certbot"
     cb_require_root
-    cb_require_os debian ubuntu
     cb_hook_context tomcat ""
     mkdir -p "$CB_LOG_DIR" "$CB_STATE_DIR" "$CB_CERTBOT_HOOK_DIR" 2>/dev/null
     cb_run_hooks pre-install
@@ -218,11 +217,11 @@ stage_detect_tomcat() {
     [[ -z "$TOMCAT_USER" ]] && TOMCAT_USER="tomcat"
     cb_ok "User: $TOMCAT_USER"
 
-    # 5. Varovani pred APR
-    if grep -qE 'AprLifecycleListener' "$TOMCAT_SERVER_XML" 2>/dev/null && \
-       grep -qE 'protocol=".*Apr' "$TOMCAT_SERVER_XML" 2>/dev/null; then
-        cb_warn "Detekovan APR/OpenSSL connector - certberus konfiguruje pouze NIO/NIO2."
-        cb_warn "Musite rucne upravit APR connector (jine atributy)."
+    # 5. Warning about APR
+    if grep -E 'AprLifecycleListener' "$TOMCAT_SERVER_XML" 2>/dev/null && \ >/dev/null
+       grep -E 'protocol=".*Apr' "$TOMCAT_SERVER_XML" 2>/dev/null; then >/dev/null
+        cb_warn "APR/OpenSSL connector detected - certberus only configures NIO/NIO2."
+        cb_warn "You must manually adjust the APR connector (different attributes)."
     fi
 }
 
@@ -345,36 +344,33 @@ for c in root.iter('Connector'):
 " 2>/dev/null || echo 8080)
             [[ -z "$tomcat_http_port" ]] && tomcat_http_port=8080
             cb_log "Tomcat HTTP connector port: $tomcat_http_port"
-            cb_firewall_redirect_80_to "$tomcat_http_port"
-            cb_firewall_ensure_http_https_for_acme
-            TOMCAT_ACME_WEBROOT=""   # certbot standalone nejde, redirect smeruje do Tomcatu
-            cb_warn "Certbot --standalone nelze - port 80 je redirected. Pouzijeme --webroot."
-            CB_TOMCAT_PORT80_STRATEGY="webroot"
-            stage_port80_setup
+            if cb_firewall_redirect_80_to "$tomcat_http_port"; then
+                cb_firewall_ensure_http_https_for_acme
+                TOMCAT_ACME_WEBROOT=""
+                cb_warn "Certbot --standalone not possible - port 80 is redirected. Using --webroot."
+                CB_TOMCAT_PORT80_STRATEGY="webroot"
+                stage_port80_setup
+            else
+                cb_log "Redirect 80->$tomcat_http_port failed, using certbot --standalone"
+                TOMCAT_ACME_WEBROOT=""
+            fi
             ;;
         webroot)
-            # Tomcat musi servirovat /.well-known/acme-challenge/ z file system adresare
-            TOMCAT_ACME_WEBROOT="${CB_TOMCAT_ACME_WEBROOT:-/var/www/acme}"
+            if [[ -n "$CB_TOMCAT_ACME_WEBROOT" ]]; then
+                TOMCAT_ACME_WEBROOT="$CB_TOMCAT_ACME_WEBROOT"
+            else
+                local wr=""
+                for d in /usr/share/tomcat/webapps/ROOT /var/lib/tomcat/webapps/ROOT; do
+                    [[ -d "$(dirname "$d")" ]] && { wr="$d"; break; }
+                done
+                [[ -z "$wr" ]] && wr="/usr/share/tomcat/webapps/ROOT"
+                TOMCAT_ACME_WEBROOT="$wr"
+            fi
             mkdir -p "$TOMCAT_ACME_WEBROOT/.well-known/acme-challenge"
             chown -R "$TOMCAT_USER:" "$TOMCAT_ACME_WEBROOT" 2>/dev/null || true
             chmod -R 755 "$TOMCAT_ACME_WEBROOT" 2>/dev/null
-
-            local ctx_dir="$TOMCAT_CONF_DIR/Catalina/localhost"
-            mkdir -p "$ctx_dir"
-            local root_xml="$ctx_dir/ROOT.xml"
-            _CB_TOMCAT_ORIG_ROOT_XML=""
-            if [[ -f "$root_xml" ]]; then
-                _CB_TOMCAT_ORIG_ROOT_XML="$root_xml.certberus-bak"
-                cp "$root_xml" "$_CB_TOMCAT_ORIG_ROOT_XML"
-                cb_log "Zaloha puvodniho ROOT.xml -> ${_CB_TOMCAT_ORIG_ROOT_XML}"
-            fi
-            cat > "$root_xml" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<Context docBase="$TOMCAT_ACME_WEBROOT" path="" reloadable="false"/>
-EOF
-            cb_ok "ACME webroot context deploy: $root_xml"
-            # Tomcat autoDeploy scanuje kazdych ~10s; pockame az context nacte
-            sleep 12
+            command -v restorecon >/dev/null 2>&1 && restorecon -R "$TOMCAT_ACME_WEBROOT" 2>/dev/null
+            cb_ok "ACME webroot: $TOMCAT_ACME_WEBROOT"
             ;;
         proxy)
             cb_log "Port80 strategy 'proxy': assuming reverse proxy (nginx/Apache)"
@@ -507,17 +503,22 @@ stage_issue_cert() {
     if [[ "$CB_EAB_REQUIRED" == "1" ]]; then
         [[ -n "$CB_EAB_KID" ]] || CB_EAB_KID=$(cb_ask_in "EAB KID" "")
         [[ -n "$CB_EAB_HMAC" ]] || CB_EAB_HMAC=$(cb_ask_secret "EAB HMAC")
-        [[ -n "$CB_EAB_KID" && -n "$CB_EAB_HMAC" ]] || cb_die "CA $CB_CA vyzaduje EAB"
+        [[ -n "$CB_EAB_KID" && -n "$CB_EAB_HMAC" ]] || cb_die "CA $CB_CA requires EAB"
     fi
 
-    # Kazdou domenu vydame samostatne (Tomcat SNI je clean takhle)
+    # Issue each domain separately (Tomcat SNI is cleaner this way)
     local d
     for d in "${VALID_DOMAINS[@]}"; do
-        cb_log "Vydavam cert pro: $d"
-        local args=(certonly --webroot -w "$TOMCAT_ACME_WEBROOT" \
-                    --email "$CB_EMAIL" --agree-tos --no-eff-email \
-                    --non-interactive --keep-until-expiring \
-                    --cert-name "$d" -d "$d")
+        cb_log "Issuing cert for: $d"
+        local args=(certonly)
+        if [[ -n "$TOMCAT_ACME_WEBROOT" ]]; then
+            args+=(--webroot -w "$TOMCAT_ACME_WEBROOT")
+        else
+            args+=(--standalone)
+        fi
+        args+=(--email "$CB_EMAIL" --agree-tos --no-eff-email \
+               --non-interactive --keep-until-expiring \
+               --cert-name "$d" -d "$d")
         [[ -n "$acme_url" ]] && args+=(--server "$acme_url")
         [[ "$CB_EAB_REQUIRED" == "1" ]] && args+=(--eab-kid "$CB_EAB_KID" --eab-hmac-key "$CB_EAB_HMAC")
         [[ "$CB_DRY_RUN" == "1" ]] && args+=(--dry-run)
@@ -624,16 +625,16 @@ for d in DOMAINS[1:]:
     add_host_config(https_conn, d)
 
 tree.write(XML, encoding='UTF-8', xml_declaration=True)
-print("Connector :443 nakonfigurovan pro {} domen".format(len(DOMAINS)))
+print("Connector :443 configured for {} domain(s)".format(len(DOMAINS)))
 PYEOF
 
-    cb_ok "server.xml upraveno"
+    cb_ok "server.xml updated"
     cb_run_hooks post-deploy
 }
 
 stage_enable_timer() {
-    if systemctl list-unit-files 2>/dev/null | grep -q '^certbot\.timer'; then
-        systemctl enable --now certbot.timer >/dev/null 2>&1 && cb_ok "certbot.timer aktivovan"
+    if systemctl list-unit-files 2>/dev/null | grep '^certbot\.timer'; then >/dev/null
+        systemctl enable --now certbot.timer >/dev/null 2>&1 && cb_ok "certbot.timer enabled"
     fi
 }
 

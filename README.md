@@ -1,6 +1,6 @@
 # Certberus
 
-Unified automation for **SSL/TLS certificate deployment** on Apache, nginx and Tomcat.
+Unified automation for **SSL/TLS certificate deployment** on Apache, nginx, Tomcat, Jetty and Caddy.
 Supports Let's Encrypt, HARICA / CESNET TCS and ZeroSSL. Pure bash + standard
 Linux tooling — no Python / Go / Node.js, no daemon.
 
@@ -100,6 +100,31 @@ sudo certberus auto --webserver tomcat --port80 webroot --webroot /var/www/html 
 sudo certberus auto --webserver tomcat --port80 iptables \
   --email admin@example.com --domain api.example.com
 ```
+
+### Jetty (certbot + PKCS12 keystore)
+
+```bash
+# Standalone (Jetty temporarily stops listening on 80 for ACME challenge):
+sudo certberus auto --webserver jetty --email admin@example.com --domain idp.example.com
+
+# With webroot (reverse proxy serves /.well-known/acme-challenge/):
+sudo certberus auto --webserver jetty --webroot /var/www/html \
+  --email admin@example.com --domain idp.example.com
+```
+
+Certberus auto-detects Jetty systemd services, locates the keystore path
+from `start.ini` / `start.d/ssl.ini`, converts PEM to PKCS12, and installs
+a certbot deploy hook for automatic renewal + keystore update. Shibboleth IdP
+on Jetty is detected as a special case (credentials dir, entity ID discovery).
+
+### Caddy (native ACME — zero-config TLS)
+
+```bash
+sudo certberus auto --webserver caddy --email admin@example.com --domain www.example.com
+```
+
+Caddy has a built-in ACME client. Certberus configures it via Caddyfile
+(email, acme_ca, acme_eab) — no certbot needed. Supports staging, HARICA/ZeroSSL EAB.
 
 ### HARICA / CESNET TCS (EAB)
 
@@ -295,19 +320,19 @@ The same values can be passed on the CLI via `--email`, `--ca`, `--domain`,
 
 ## What it does
 
-| | Apache (mod_md) | nginx (certbot) | Tomcat 9+ (certbot) | certbot-only |
-|---|:-:|:-:|:-:|:-:|
-| Let's Encrypt | yes | yes | yes | yes |
-| HARICA / CESNET TCS (EAB) | yes | yes | yes | yes |
-| ZeroSSL (EAB) | yes | yes | yes | yes |
-| Staging (test CA) | yes | yes | yes | yes |
-| Auto-detect domains | VirtualHost | server_name | Host name | — |
-| Snapshot before change | yes | yes | yes | yes |
-| Rollback on error | yes | yes | atomic cert swap | yes |
-| Firewall auto-open (80/443) | yes | yes | yes | yes |
-| Auto-renewal | mod_md built-in | certbot.timer | certbot.timer | certbot.timer |
-| Custom pre/post hooks | yes | yes | yes | yes |
-| Works on RHEL/Fedora | — | — | — | **yes** |
+| | Apache (mod_md) | nginx (certbot) | Tomcat 9+ (certbot) | Jetty (certbot) | Caddy (native) | certbot-only |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|
+| Let's Encrypt | yes | yes | yes | yes | yes | yes |
+| HARICA / CESNET TCS (EAB) | yes | yes | yes | yes | yes | yes |
+| ZeroSSL (EAB) | yes | yes | yes | yes | yes | yes |
+| Staging (test CA) | yes | yes | yes | yes | yes | yes |
+| Auto-detect domains | VirtualHost | server_name | Host name | IdP / XML | Caddyfile | — |
+| Snapshot before change | yes | yes | yes | yes | yes | yes |
+| Rollback on error | yes | yes | atomic cert swap | keystore rollback | yes | yes |
+| Firewall auto-open (80/443) | yes | yes | yes | yes | yes | yes |
+| Auto-renewal | mod_md built-in | certbot.timer | certbot.timer | certbot.timer | Caddy built-in | certbot.timer |
+| Custom pre/post hooks | yes | yes | yes | yes | yes | yes |
+| Works on RHEL/Fedora | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** |
 
 ---
 
@@ -391,28 +416,29 @@ local interface, use `--skip-dns-check` to bypass the local DNS-points-here chec
 
 Tested end-to-end (staging + production certs, external SSL verification):
 
-| OS | certbot-only | Apache (mod_md) | nginx (certbot) | Tomcat (certbot) | SELinux |
-|---|:-:|:-:|:-:|:-:|:-:|
-| Debian 12 | **yes** | supported | **yes** | supported | — |
-| Debian 13 (trixie) | **yes** | **yes** | **yes** | **yes** | — |
-| Ubuntu 22.04 LTS | **yes** | supported | **yes** | supported | — |
-| Ubuntu 24.04 LTS | **yes** | **yes** | supported | **yes** | — |
-| Ubuntu 25.10 | **yes** | supported | **yes** | supported | — |
-| Rocky Linux 8 | **yes** | — | — | — | Enforcing |
-| Rocky Linux 9 | **yes** | — | — | — | Enforcing |
-| AlmaLinux 8 | **yes** | — | — | — | Enforcing |
-| AlmaLinux 9 | **yes** | — | — | — | Enforcing |
-| CentOS Stream 9 | **yes** | — | — | — | Enforcing |
-| Fedora 42 | **yes** | — | — | — | Enforcing |
-| Fedora 43 | **yes** | — | — | — | Enforcing |
+| OS | certbot-only | Apache (mod_md) | nginx (certbot) | Tomcat (certbot) | Jetty (certbot) | Caddy (native) | SELinux |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| Debian 12 | **yes** | supported | **yes** | supported | supported | supported | — |
+| Debian 13 (trixie) | **yes** | **yes** | **yes** | **yes** | supported | supported | — |
+| Ubuntu 22.04 LTS | **yes** | supported | **yes** | supported | supported | supported | — |
+| Ubuntu 24.04 LTS | **yes** | **yes** | supported | **yes** | supported | supported | — |
+| Ubuntu 25.10 | **yes** | supported | **yes** | supported | supported | supported | — |
+| Rocky Linux 8 | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | Enforcing |
+| Rocky Linux 9 | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | Enforcing |
+| Rocky Linux 10 | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | Enforcing |
+| AlmaLinux 8 | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | Enforcing |
+| AlmaLinux 9 | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | Enforcing |
+| AlmaLinux 10 | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | Enforcing |
+| CentOS Stream 9 | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | Enforcing |
+| CentOS Stream 10 | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | Enforcing |
+| Fedora 42 | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | Enforcing |
+| Fedora 43 | **yes** | **yes** | **yes** | **yes** | **yes** | **yes** | Enforcing |
 
 **yes** = tested end-to-end on real hardware. **supported** = code supports it (same
 codebase as tested OS versions), not yet verified on this specific version.
-— = not available (module gated to Debian/Ubuntu).
 
-Apache, nginx and Tomcat modules are gated to Debian/Ubuntu (they manage distro packages).
-`certbot-only` is universal and works on all supported OS. RHEL-family distros auto-install
-EPEL for certbot (Fedora uses base repos).
+All webserver modules work on both Debian/Ubuntu and RHEL/Fedora families.
+RHEL-family distros auto-install EPEL for certbot (Fedora uses base repos).
 
 Package manager backends exist for **zypper** (openSUSE/SLES) and **apk** (Alpine) but
 are untested on real hardware.

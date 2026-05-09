@@ -1,19 +1,22 @@
-# Certberus — vysledky testovani
+# Certberus — Testing Results
 
-Posledni aktualizace: 2026-05-09
-Verze: 0.1.17
+Last updated: 2026-05-09
+Version: 0.1.18
 
-## Testovane platformy
+## Tested platforms
 
-| OS | Verze | Arch | IP | DNS | Vysledek |
-|----|-------|------|----|-----|----------|
-| Rocky Linux | 8.8 | x86_64 | <ip> | *.example.com | **PASS** (certbot-only, 3-SAN, hooks, prod cert) |
-| Rocky Linux | 9.2 | x86_64 | <ip> | *.example.com | **PASS** (certbot-only, rollback hook) |
-| AlmaLinux | 8.10 | x86_64 | <ip> | *.example.com | **PASS** (certbot-only, firewalld) |
-| AlmaLinux | 9.7 | x86_64 | <ip> | *.example.com | **PASS** (certbot-only, rollback, --no-firewall) |
-| CentOS Stream | 9 | x86_64 | <ip> | *.example.com | **PASS** (certbot-only, HARICA validation) |
-| Fedora | 42 | x86_64 | <ip> | *.example.com | **PASS** (certbot-only, 2-SAN, prod cert) |
-| Fedora | 43 | x86_64 | <ip> | *.example.com | **PASS** (certbot-only) |
+| OS | Version | Arch | IP | DNS | Result |
+|----|---------|------|----|-----|--------|
+| Rocky Linux | 8.8 | x86_64 | <ip> | *.rocky8.example.com | **PASS** (all 6 modules, SELinux Enforcing) |
+| Rocky Linux | 9.2 | x86_64 | <ip> | *.rocky9.example.com | **PASS** (all 6 modules, SELinux Enforcing+Permissive) |
+| Rocky Linux | 10.0 | x86_64 | <ip> | *.rocky10.example.com | **PASS** (all 6 modules, SELinux Enforcing) |
+| AlmaLinux | 8.10 | x86_64 | <ip> | *.alma8.example.com | **PASS** (all 6 modules, SELinux Enforcing) |
+| AlmaLinux | 9 | x86_64 | <ip> | *.alma9.example.com | **PASS** (all 6 modules, SELinux Enforcing+Permissive) |
+| AlmaLinux | 10 | x86_64 | <ip> | *.alma10.example.com | **PASS** (all 6 modules, SELinux Enforcing) |
+| CentOS Stream | 9 | x86_64 | <ip> | *.centos9.example.com | **PASS** (all 6 modules, SELinux Enforcing) |
+| CentOS Stream | 10 | x86_64 | <ip> | *.centos10.example.com | **PASS** (all 6 modules, SELinux Enforcing) |
+| Fedora | 42 | x86_64 | <ip> | *.fedora42.example.com | **PASS** (all 6 modules, SELinux Enforcing+Permissive) |
+| Fedora | 43 | x86_64 | <ip> | *.fedora43.example.com | **PASS** (all 6 modules, SELinux Enforcing) |
 | Debian | 12 | x86_64 | <ip> | *.example.com | **PASS** (certbot-only, nginx-certbot, prod cert, ext. SSL ✓) |
 | Debian | 13 | x86_64 | <ip> | *.example.com | **PASS** (nginx, apache-md, tomcat, certbot-only, hooks, prod cert, ext. SSL ✓) |
 | Ubuntu | 22.04 LTS | x86_64 | <ip> | *.example.com | **PASS** (nginx, certbot-only) |
@@ -130,9 +133,12 @@ Verze: 0.1.17
 
 | Test | OS | Status |
 |------|----|--------|
-| SELinux Enforcing — vsechny operace | Rocky 8, Rocky 9, Alma 8, Alma 9, CentOS 9, Fedora 42, Fedora 43 | PASS |
-| Zadne AVC denials (ausearch) | Vsechny RHEL (7 serveru) | PASS — 0 AVCs |
-| getenforce stale Enforcing | Vsechny RHEL | PASS |
+| SELinux Enforcing — all operations (6 modules) | All RHEL (10 servers) | PASS |
+| No AVC denials (ausearch) | All RHEL (10 servers) | PASS — 0 AVCs |
+| getenforce still Enforcing | All RHEL | PASS |
+| httpd_can_network_connect auto-enable | All RHEL (apache module) | PASS |
+| restorecon after mktemp+mv | All RHEL (apache module) | PASS |
+| SELinux Permissive vs Enforcing comparison | Rocky 9, Alma 9, Fedora 42 | PASS — identical result |
 
 ### Bundle
 
@@ -221,63 +227,112 @@ Verze: 0.1.17
 |---|-------------|------|-----|
 | 1 | Domain duplication (`-d x -d x`) | `bin/certberus`, `webservers/certbot-only.sh` | Dedup in `stage_find_domains` |
 | 2 | `cb_pkg_installed` false positive (dpkg deinstall state) | `lib/os.sh:82` | `dpkg-query -W -f='${Status}'` + grep "install ok installed" |
-| 3 | nginx ACME webroot 0700 (www-data 403) | `webservers/nginx-certbot.sh:131` | `chmod 0755` po mkdir |
-| 4 | mod_md polling jen staging/, ne domains/ | `webservers/apache-md.sh` | Poll obe cesty + extra graceful |
-| 5 | `cmd_rollback` unbound variable `$last` | `bin/certberus:979,986` | `local last=""` + certbot-only pattern ve find |
-| 6 | certbot-only ignoruje --firewall | `webservers/certbot-only.sh` | Pridan `stage_firewall` s `cb_firewall_ensure_http_https` |
+| 3 | nginx ACME webroot 0700 (www-data 403) | `webservers/nginx-certbot.sh:131` | `chmod 0755` after mkdir |
+| 4 | mod_md polling only staging/, not domains/ | `webservers/apache-md.sh` | Poll both paths + extra graceful |
+| 5 | `cmd_rollback` unbound variable `$last` | `bin/certberus:979,986` | `local last=""` + certbot-only pattern in find |
+| 6 | certbot-only ignores --firewall | `webservers/certbot-only.sh` | Added `stage_firewall` with `cb_firewall_ensure_http_https` |
 
-### v0.1.16 (4 opravy)
+### v0.1.16 (4 fixes)
 
-| # | Popis | Soubor | Oprava |
-|---|-------|--------|--------|
-| 7 | `cmd_hooks` ukazuje .disabled/.bak soubory | `bin/certberus` | find -executable + ! -name filtr |
-| 8 | `doctor` bez curl pada (cb_server_ipv4/v6) | `lib/dns.sh` | `command -v curl` guard |
-| 9 | scan vraci exit code 1 | `lib/scan.sh`, `bin/certberus` | Explicitni `return 0` |
-| 10 | Domain merge z config.env (stare CB_DOMAINS) | `bin/certberus` | `build_forward_args` resetuje CB_DOMAINS pri CLI --domain |
+| # | Description | File | Fix |
+|---|-------------|------|-----|
+| 7 | `cmd_hooks` shows .disabled/.bak files | `bin/certberus` | find -executable + ! -name filter |
+| 8 | `doctor` without curl crashes (cb_server_ipv4/v6) | `lib/dns.sh` | `command -v curl` guard |
+| 9 | scan returns exit code 1 | `lib/scan.sh`, `bin/certberus` | Explicit `return 0` |
+| 10 | Domain merge from config.env (old CB_DOMAINS) | `bin/certberus` | `build_forward_args` resets CB_DOMAINS on CLI --domain |
 
-### v0.1.17 (5 oprav)
+### v0.1.17 (5 fixes)
 
-| # | Popis | Soubor | Oprava |
-|---|-------|--------|--------|
-| 11 | CA_SOURCE nepropaguje do hooku | `lib/hooks.sh`, `webservers/*.sh` | Export v cb_run_hooks/cb_hook_context/cb_hook_set_cert + explicitni export v modulech |
-| 12 | Dry-run retryuje 3x (cert file neexistuje) | `lib/common.sh` | `cb_certbot_issue` preskoci file check pri dry-run |
-| 13 | Bundle pada na /tmp noexec | `build/bundle.sh` | Fallback /var/tmp → /tmp s exec test |
-| 14 | EPEL neni auto-enablovano (RHEL/CentOS/Alma/Rocky) | `lib/os.sh` | `cb_pkg_install` automaticky `dnf install epel-release` |
-| 15 | cmd_auto nepersistuje EAB credentials do config.env | `bin/certberus` | Predani CLI_EAB_KID/HMAC/ACME_URL do `cb_persist_config_skeleton` |
+| # | Description | File | Fix |
+|---|-------------|------|-----|
+| 11 | CA_SOURCE not propagated to hook | `lib/hooks.sh`, `webservers/*.sh` | Export in cb_run_hooks/cb_hook_context/cb_hook_set_cert + explicit export in modules |
+| 12 | Dry-run retries 3x (cert file does not exist) | `lib/common.sh` | `cb_certbot_issue` skips file check on dry-run |
+| 13 | Bundle crashes on /tmp noexec | `build/bundle.sh` | Fallback /var/tmp → /tmp with exec test |
+| 14 | EPEL not auto-enabled (RHEL/CentOS/Alma/Rocky) | `lib/os.sh` | `cb_pkg_install` automatically `dnf install epel-release` |
+| 15 | cmd_auto does not persist EAB credentials to config.env | `bin/certberus` | Pass CLI_EAB_KID/HMAC/ACME_URL to `cb_persist_config_skeleton` |
 
-### Pozorovani z tohoto testu
+### v0.1.18 — RHEL full modules + Jetty + Caddy (8 fixes)
 
-| # | Popis | Hodnoceni |
-|---|-------|-----------|
-| — | DNS round-robin (*.example.com → 12 IP) zpusobuje selhani LE HTTP-01 challenge | Neni bug certberus — LE musi dosahnout presnou IP. Reseno socat forwardingem pri testovani. |
-| — | 1GB RAM servery (Rocky 9, Alma 9, CentOS 9) OOM pri `dnf install certbot` | Neni bug — nedostatek RAM. Reseno pridanim swapu. |
-| — | HARICA EAB credentials jsou single-use pro registraci uctu | Neni bug certberus — HARICA ACME server chrani EAB pred znovupouzitim. |
-| — | Config.env z HARICA testu (CB_CA=harica, CB_ACME_URL) pretrvava a ovlivni dalsi beh s --staging | Potencialni UX problem. CLI --staging by mel ignorovat CB_ACME_URL z config.env kdyz neni --ca harica. |
-| **16** | **Ubuntu 25.10: /var/www ma permissions 700** — nginx worker (www-data) nemuze cist webroot pro ACME challenge. `nginx-certbot` modul vytvori `/var/www/acme` ale neoveruje traversovatelnost rodicovskeho adresare. | **OPRAVENO** — refaktorovano: modul nyni auto-detekuje nginx document root z `nginx -T`, pouziva standardni `/var/www/html` (fallback). `/var/www/acme` + snippet pristup odstranen. Migracni kod cisti pozustatky z <=0.1.16. E2E overeno: Debian 12, Ubuntu 25.10. |
+E2E testing of all 6 webserver modules on 10 RHEL-family servers (60 combinations).
 
-## Zname limitace
+| # | Description | File | Fix |
+|---|-------------|------|-----|
+| 17 | `apachectl -M` returns "not supported" on el9+ | `webservers/apache-md.sh` | `_cb_apache_list_modules()` fallback: apachectl → httpd → apache2ctl |
+| 18 | `MDContactEmail` does not exist in mod_md < 2.4.0 (el8 has 2.0.8) | `webservers/apache-md.sh` | mod_md version detection, conditional `_APACHE_MD_HAS_CONTACT_EMAIL` |
+| 19 | SELinux `user_tmp_t` on certberus-ssl.conf (mktemp+mv) | `webservers/apache-md.sh`, `lib/preflight.sh` | `restorecon` after `mv` of stub vhost and fallback cert |
+| 20 | SELinux `httpd_can_network_connect off` blocks mod_md ACME | `webservers/apache-md.sh` | `stage_selinux()` — `setsebool -P httpd_can_network_connect on` |
+| 21 | nginx webroot depth detection hardcoded depth==1 | `webservers/nginx-certbot.sh` | Relative depth tracking against server block depth (`sd=depth`) |
+| 22 | nginx reload on inactive service | `webservers/nginx-certbot.sh` | `cb_svc_is_active nginx \|\| cb_svc_start nginx` before reload |
+| 23 | Tomcat certbot always --webroot, even when webroot empty | `webservers/tomcat-certbot.sh` | Standalone fallback when `TOMCAT_ACME_WEBROOT` empty; webroot via Tomcat webapps/ROOT |
+| 24 | `grep -q` + `set -o pipefail` → SIGPIPE (rc=141) | all webserver modules, `bin/certberus` | `grep ... >/dev/null` instead of `grep -q` for all `systemctl \| grep` |
+| 25 | Jetty ssl.ini commented lines match grep | `webservers/jetty-certbot.sh` | `stage_inject_jetty_ssl()` — grep uncommented lines only, append full config |
 
-1. **Apache mod_md EAB** (apache-md-eab.sh) — netestovano (vyzaduje HARICA + Apache, apache moduly povoleny jen na Debian/Ubuntu)
-2. **openSUSE / SLES** — zypper backend existuje v kodu, ale nebyl testovan na realnem HW
-3. **Alpine** — apk backend existuje v kodu, ale nebyl testovan
-4. **ARM / aarch64** — netestovano
-5. **UFW firewall** — detekce funguje, ale auto-open zpusobil SSH lockout na Ubuntu (drive)
-6. **Config.env placeholder** — stary install.sh generoval `CB_ACME_URL` s placeholder `....` (ne komentovany). `cb_sanitize_acme_url` to chyti.
+#### RHEL module E2E matrix (10 servers x 6 modules = 60 tests)
 
-## Celkovy souhrn
+| OS | certbot-only | Apache (mod_md) | nginx (certbot) | Tomcat (certbot) | Caddy (native) | Jetty (certbot) | SELinux |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| Rocky Linux 8 | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | Enforcing |
+| Rocky Linux 9 | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | Enforcing |
+| Rocky Linux 10 | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | Enforcing |
+| AlmaLinux 8 | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | Enforcing |
+| AlmaLinux 9 | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | Enforcing |
+| AlmaLinux 10 | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | Enforcing |
+| CentOS Stream 9 | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | Enforcing |
+| CentOS Stream 10 | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | Enforcing |
+| Fedora 42 | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | Enforcing |
+| Fedora 43 | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | **PASS** | Enforcing |
 
-| Metrika | Hodnota |
-|---------|---------|
-| Testovanych platforem | 12 (+ 5 z drivejska = 17 celkem) |
-| Novych platforem | Fedora 42, Fedora 43, Rocky 8, Alma 8/9, Debian 12 |
-| Unikatnich OS verzi | 10 |
-| Staging certu vydano | 21 |
-| Produkcnich certu vydano | 5 (Rocky 8, Fedora 42, Debian 12, Debian 13, Ubuntu 25.10) |
-| Ext. SSL overeni (Verify: 0 ok) | 5/5 produkcnich, 4/4 staging |
-| Tomcat modulu otestovano | 2 (Debian 13, Ubuntu 24.04) — PRVNI REAL HW TEST |
-| SELinux Enforcing serveru | 7 (vsechny RHEL, 0 AVC denials) |
-| Hook testu | 11 (post-issue, timeout, filtering, on-rollback) |
-| Firewall backendu otestovano | 4 (iptables legacy, iptables nf_tables, firewalld, nftables) |
-| Unit testu | 16 pass, 0 fail |
-| Chaos testu | 7 pass |
-| Novych bugu nalezeno | 1 (#16: Ubuntu 25.10 /var/www 700 — opraveno refaktoringem) |
+SELinux Permissive comparison (rocky9, alma9, fedora42): Apache works identically in Enforcing and Permissive — no AVC denials.
+
+#### Servers
+
+| Server | IP | DNS |
+|--------|-----|-----|
+| Rocky 8 | <ip> | *.rocky8.example.com |
+| Rocky 9 | <ip> | *.rocky9.example.com |
+| Rocky 10 | <ip> | *.rocky10.example.com |
+| AlmaLinux 8 | <ip> | *.alma8.example.com |
+| AlmaLinux 9 | <ip> | *.alma9.example.com |
+| AlmaLinux 10 | <ip> | *.alma10.example.com |
+| CentOS Stream 9 | <ip> | *.centos9.example.com |
+| CentOS Stream 10 | <ip> | *.centos10.example.com |
+| Fedora 42 | <ip> | *.fedora42.example.com |
+| Fedora 43 | <ip> | *.fedora43.example.com |
+
+### Observations from this testing
+
+| # | Description | Assessment |
+|---|-------------|------------|
+| — | DNS round-robin (*.example.com → 12 IP) causes LE HTTP-01 challenge failure | Not a certberus bug — LE must reach the exact IP. Resolved with socat forwarding during testing. |
+| — | 1GB RAM servers (Rocky 9, Alma 9, CentOS 9) OOM on `dnf install certbot` | Not a bug — insufficient RAM. Resolved by adding swap. |
+| — | HARICA EAB credentials are single-use for account registration | Not a certberus bug — HARICA ACME server protects EAB from reuse. |
+| — | Config.env from HARICA test (CB_CA=harica, CB_ACME_URL) persists and affects next run with --staging | Potential UX issue. CLI --staging should ignore CB_ACME_URL from config.env when --ca harica is not set. |
+| **16** | **Ubuntu 25.10: /var/www has permissions 700** — nginx worker (www-data) cannot read webroot for ACME challenge. `nginx-certbot` module creates `/var/www/acme` but does not verify traversability of the parent directory. | **FIXED** — refactored: module now auto-detects nginx document root from `nginx -T`, uses standard `/var/www/html` (fallback). `/var/www/acme` + snippet approach removed. Migration code cleans up remnants from <=0.1.16. E2E verified: Debian 12, Ubuntu 25.10. |
+
+## Known limitations
+
+1. **Apache mod_md EAB** (apache-md-eab.sh) — not tested (requires HARICA + Apache)
+2. **openSUSE / SLES** — zypper backend exists in code but was not tested on real hardware
+3. **Alpine** — apk backend exists in code but was not tested
+4. **ARM / aarch64** — not tested
+5. **UFW firewall** — detection works, but auto-open caused SSH lockout on Ubuntu (earlier)
+6. **Config.env placeholder** — old install.sh generated `CB_ACME_URL` with placeholder `....` (not commented). `cb_sanitize_acme_url` catches it.
+
+## Overall summary
+
+| Metric | Value |
+|--------|-------|
+| Tested platforms | 17 (12 Debian/Ubuntu/RHEL + 5 previous) |
+| RHEL-family modules E2E | 60/60 PASS (10 servers x 6 modules) |
+| New platforms in this round | Rocky 10, AlmaLinux 10, CentOS Stream 10 |
+| Unique OS versions | 13 |
+| Staging certs issued | 81 (21 previous + 60 new) |
+| Production certs issued | 5 (Rocky 8, Fedora 42, Debian 12, Debian 13, Ubuntu 25.10) |
+| Ext. SSL verification (Verify: 0 ok) | 5/5 production, 4/4 staging |
+| SELinux Enforcing servers | 10 (all RHEL, 0 AVC denials) |
+| SELinux Permissive comparison | 3 (rocky9, alma9, fedora42) — identical result |
+| Hook tests | 11 (post-issue, timeout, filtering, on-rollback) |
+| Firewall backends tested | 4 (iptables legacy, iptables nf_tables, firewalld, nftables) |
+| Unit tests | 16 pass, 0 fail |
+| Chaos tests | 7 pass |
+| New bugs found in v0.1.18 | 9 (#17-#25: Apache SELinux/RHEL, nginx depth, Tomcat standalone, Jetty ssl.ini, SIGPIPE) |

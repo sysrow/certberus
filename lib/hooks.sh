@@ -94,6 +94,7 @@ cb_hook_context() {
     CA_DOMAIN_LIST="$*"
     case "$CA_WEBSERVER" in
         apache) CA_SOURCE="mod_md" ;;
+        caddy)  CA_SOURCE="caddy" ;;
         *)      CA_SOURCE="certbot" ;;
     esac
     export CA_WEBSERVER CA_PRIMARY_DOMAIN CA_DOMAIN_LIST CA_SOURCE

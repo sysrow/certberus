@@ -35,12 +35,45 @@ source "$_LIB_DIR/hooks.sh"
 # shellcheck disable=SC1091
 source "$_LIB_DIR/preflight.sh"
 
-cb_load_config  # nacte config.env + advanced.env pokud existuji
+cb_load_config  # loads config.env + advanced.env if they exist
 
-# -------- Defaults specificke pro tento modul --------
-: "${CB_APACHE_CONF_DIR:=/etc/apache2/sites-available}"
-: "${CB_APACHE_ENABLED_DIR:=/etc/apache2/sites-enabled}"
-: "${CB_MOD_MD_CONF:=/etc/apache2/conf-available/certberus-md.conf}"
+# -------- OS-specific defaults --------
+case "$CB_OS_ID" in
+    debian|ubuntu)
+        _APACHE_PKG=apache2
+        _APACHE_SVC=apache2
+        _APACHE_USER=www-data
+        _APACHE_ROOT=/etc/apache2
+        _APACHE_LOG_DIR=/var/log/apache2
+        _APACHE_MD_STORE=/etc/apache2/md
+        _APACHE_HAS_A2EN=1
+        _APACHE_MOD_MD_PKG=libapache2-mod-md
+        _APACHE_CONF_DIR_DEFAULT=/etc/apache2/sites-available
+        _APACHE_ENABLED_DIR_DEFAULT=/etc/apache2/sites-enabled
+        _APACHE_MOD_MD_CONF_DEFAULT=/etc/apache2/conf-available/certberus-md.conf
+        ;;
+    rocky|almalinux|centos|rhel|fedora)
+        _APACHE_PKG=httpd
+        _APACHE_SVC=httpd
+        _APACHE_USER=apache
+        _APACHE_ROOT=/etc/httpd
+        _APACHE_LOG_DIR=/var/log/httpd
+        _APACHE_MD_STORE=/etc/httpd/md
+        _APACHE_HAS_A2EN=0
+        _APACHE_MOD_MD_PKG=mod_md
+        _APACHE_CONF_DIR_DEFAULT=/etc/httpd/conf.d
+        _APACHE_ENABLED_DIR_DEFAULT=/etc/httpd/conf.d
+        _APACHE_MOD_MD_CONF_DEFAULT=/etc/httpd/conf.d/certberus-md.conf
+        ;;
+    *)
+        cb_die "OS $CB_OS_ID is not supported for apache-md. Supported: debian, ubuntu, rocky, almalinux, centos, rhel, fedora."
+        ;;
+esac
+
+# -------- Defaults specific to this module --------
+: "${CB_APACHE_CONF_DIR:=$_APACHE_CONF_DIR_DEFAULT}"
+: "${CB_APACHE_ENABLED_DIR:=$_APACHE_ENABLED_DIR_DEFAULT}"
+: "${CB_MOD_MD_CONF:=$_APACHE_MOD_MD_CONF_DEFAULT}"
 : "${CB_MOD_MD_DIR:=/opt/certberus/mod_md}"
 : "${CB_MOD_MD_HOOK_SCRIPT:=/opt/certberus/mod_md-adapter.sh}"
 : "${CB_MOD_MD_LOG_DIR:=/var/log/mod_md}"
@@ -125,12 +158,11 @@ stage_prepare() {
     cb_log "OS: $CB_OS_ID $CB_OS_VERSION (pkg: $CB_PKG_MGR)"
     cb_log "Firewall: $(cb_firewall_backend_pretty)"
     cb_require_root
-    cb_require_os debian ubuntu
     cb_hook_context apache ""
 
     # Directories
     mkdir -p "$CB_LOG_DIR" "$CB_MOD_MD_DIR" "$CB_MOD_MD_LOG_DIR" "$CB_STATE_DIR" 2>/dev/null
-    chown root:www-data "$CB_MOD_MD_DIR" "$CB_MOD_MD_LOG_DIR" 2>/dev/null || true
+    chown "root:$_APACHE_USER" "$CB_MOD_MD_DIR" "$CB_MOD_MD_LOG_DIR" 2>/dev/null || true
 
     cb_run_hooks pre-install
 }
@@ -138,18 +170,12 @@ stage_prepare() {
 stage_install_packages() {
     cb_sep
     local need=()
-    cb_pkg_installed apache2 || need+=(apache2)
-    # Minimum deps:
-    #   - apache2  (webserver sam)
-    #   - openssl  (self-signed fallback cert kdyz neni snakeoil)
-    # NEINSTALUJEME:
-    #   - iptables: respektujeme stav stroje. Kdyz je firewalld/ufw/nft, pouzijeme je.
-    #     Kdyz neni vubec firewall (CB_FW_BACKEND=none), pouze varujeme - user
-    #     rozhodne zda chce firewall pridat. Nikdy nezmenime backend na stroji.
-    #   - apache2-utils: htpasswd/ab nepotrebujeme, apache2ctl je v apache2
-    #   - ssl-cert: snakeoil fallback = openssl ad-hoc v CB_STATE_DIR
-    #   - dnsutils: getent zvlada A/AAAA
+    cb_pkg_installed "$_APACHE_PKG" || need+=("$_APACHE_PKG")
     command -v openssl >/dev/null 2>&1 || need+=(openssl)
+    if (( _APACHE_HAS_A2EN == 0 )); then
+        cb_pkg_installed "$_APACHE_MOD_MD_PKG" || need+=("$_APACHE_MOD_MD_PKG")
+        cb_pkg_installed mod_ssl || need+=(mod_ssl)
+    fi
 
     if (( ${#need[@]} > 0 )); then
         cb_log "Missing packages: ${need[*]}"
@@ -178,51 +204,78 @@ stage_install_packages() {
 
 stage_check_apache_version() {
     local ver
-    # Jedno awk misto dvou: F=/ vezme 2. pole a split() ho rozsekne na mezery.
-    ver=$(apache2 -v 2>/dev/null | awk -F'/' '/version:/ {split($2,a," "); print a[1]; exit}')
+    ver=$("$_APACHE_SVC" -v 2>/dev/null | awk -F'/' '/version:/ {split($2,a," "); print a[1]; exit}')
+    [[ -z "$ver" ]] && ver=$(apachectl -v 2>/dev/null | awk -F'/' '/version:/ {split($2,a," "); print a[1]; exit}')
     [[ -z "$ver" ]] && ver=$(apache2ctl -v 2>/dev/null | awk -F'/' '/version:/ {split($2,a," "); print a[1]; exit}')
     if [[ -z "$ver" ]]; then
-        cb_warn "Nelze detekovat verzi Apache"
+        cb_warn "Cannot detect Apache version"
         return 0
     fi
-    cb_log "Apache verze: $ver"
+    cb_log "Apache version: $ver"
     local a b c
     IFS=. read -r a b c <<<"$ver"
     if (( a*10000 + b*100 + ${c:-0} < 2*10000 + 4*100 + 34 )); then
-        cb_die "Apache $ver je prilis stary. MDMessageCMD vyzaduje 2.4.34+ (Debian 10 dodava 2.4.38, Ubuntu 18.04 ma 2.4.29)."
+        cb_die "Apache $ver is too old. MDMessageCMD requires 2.4.34+."
     fi
 
-    if command -v apache2ctl >/dev/null; then APACHECTL=apache2ctl
-    elif command -v apachectl >/dev/null; then APACHECTL=apachectl
-    else cb_die "Nenalezen apache2ctl/apachectl"
+    if command -v apachectl >/dev/null; then APACHECTL=apachectl
+    elif command -v apache2ctl >/dev/null; then APACHECTL=apache2ctl
+    elif command -v httpd >/dev/null; then APACHECTL=httpd
+    else cb_die "apachectl/apache2ctl/httpd not found"
     fi
+
+    # mod_md < 2.4.0 (el8) does not have MDContactEmail
+    _APACHE_MD_HAS_CONTACT_EMAIL=1
+    local md_ver
+    md_ver=$(rpm -q --qf '%{VERSION}' mod_md 2>/dev/null) || md_ver=""
+    if [[ -n "$md_ver" ]]; then
+        local md_maj md_min
+        IFS=. read -r md_maj md_min _ <<<"$md_ver"
+        if (( md_maj < 2 || (md_maj == 2 && md_min < 4) )); then
+            _APACHE_MD_HAS_CONTACT_EMAIL=0
+            cb_debug "mod_md $md_ver — MDContactEmail not available"
+        fi
+    fi
+}
+
+_cb_apache_list_modules() {
+    local out
+    out=$("$APACHECTL" -M 2>&1)
+    if echo "$out" | grep -q '_module'; then
+        echo "$out"
+        return 0
+    fi
+    # RHEL el9+ apachectl -M does not return modules, try httpd directly
+    out=$(httpd -M 2>&1) && echo "$out" | grep -q '_module' && { echo "$out"; return 0; }
+    out=$(apache2ctl -M 2>&1) && echo "$out" | grep -q '_module' && { echo "$out"; return 0; }
+    return 1
 }
 
 stage_snapshot() {
     cb_sep
     cb_run_hooks pre-snapshot
-    cb_snapshot /etc/apache2 "apache2-pre-md" >/dev/null || cb_warn "Snapshot se nepodaril"
+    cb_snapshot "$_APACHE_ROOT" "apache2-pre-md" >/dev/null || cb_warn "Snapshot failed"
     cb_run_hooks post-snapshot
 }
 
 stage_preflight() {
-    # Diagnostika existujiciho stavu Apache. Nemeni nic.
-    cb_preflight_apache || true  # rc jen informativni
+    # Diagnostics of existing Apache state. Does not change anything.
+    cb_preflight_apache || true  # rc is informational only
 }
 
 stage_fix_existing_ssl() {
-    # Pokud existujici vhosty maji SSLCertificateFile s neexistujici cestou,
-    # nahradime snakeoilem (jinak by apache2ctl -t selhal).
+    # If existing vhosts have SSLCertificateFile with a non-existent path,
+    # replace with snakeoil (otherwise apache2ctl -t would fail).
     local fixed
-    fixed=$(cb_apache_fix_ssl_cert_paths /etc/apache2)
+    fixed=$(cb_apache_fix_ssl_cert_paths "$_APACHE_ROOT")
     if (( fixed > 0 )); then
-        cb_ok "Opraveno $fixed vhostu s nevalidni SSL cestou"
+        cb_ok "Fixed $fixed vhosts with invalid SSL path"
     fi
 }
 
 stage_fix_broken_symlinks() {
     local broken
-    broken=$(cb_apache_find_broken_symlinks /etc/apache2)
+    broken=$(cb_apache_find_broken_symlinks "$_APACHE_ROOT")
     if [[ -n "$broken" ]]; then
         cb_warn "Broken symlinks in Apache:"
         echo "$broken" | sed 's/^/    /'
@@ -236,27 +289,27 @@ stage_fix_broken_symlinks() {
 # Auto-fix: regular files directly in sites-enabled/conf-enabled (Debian/Ubuntu quirk)
 # Helps the admin instead of having to manually run mv + a2ensite.
 stage_fix_sites_enabled_regular_files() {
-    [[ -d /etc/apache2/sites-enabled || -d /etc/apache2/conf-enabled ]] || return 0
-    # Najdi regular files (ne symlinky) - dry-run si jen dotazeme
+    (( _APACHE_HAS_A2EN )) || return 0
+    [[ -d "$_APACHE_ROOT/sites-enabled" || -d "$_APACHE_ROOT/conf-enabled" ]] || return 0
     local found
-    found=$(find /etc/apache2/sites-enabled /etc/apache2/conf-enabled \
+    found=$(find "$_APACHE_ROOT/sites-enabled" "$_APACHE_ROOT/conf-enabled" \
         -maxdepth 1 -type f ! -name '*.bak_*' 2>/dev/null)
     [[ -z "$found" ]] && return 0
 
-    cb_warn "Nalezeny regular soubory primo v sites-enabled/conf-enabled:"
+    cb_warn "Found regular files directly in sites-enabled/conf-enabled:"
     echo "$found" | sed 's/^/    /'
-    cb_log "Debian/Ubuntu Apache ocekava jen symlinky sem. Adminovi takhle nefunguje a2dissite."
-    if cb_ask_yn "Presunout do sites-available/conf-available a vytvorit symlinky?" "Y/n"; then
+    cb_log "Debian/Ubuntu Apache expects only symlinks here. a2dissite does not work for the admin this way."
+    if cb_ask_yn "Move to sites-available/conf-available and create symlinks?" "Y/n"; then
         local fixed
-        fixed=$(cb_apache_fix_sites_enabled_regular_files /etc/apache2)
+        fixed=$(cb_apache_fix_sites_enabled_regular_files "$_APACHE_ROOT")
         if (( fixed > 0 )); then
-            cb_ok "Presunuto $fixed souboru (zalohy .bak_* zustaly)"
+            cb_ok "Moved $fixed files (backups .bak_* remain)"
         fi
     fi
 }
 
-# Detekce jine aktivni MDomain conf - predchazi AH10038 "overlap"
-# Pokryva: apache2.conf, conf-available/enabled, sites-*, mods-*, conf.d, neznama mista.
+# Detect other active MDomain conf - prevents AH10038 "overlap"
+# Covers: apache2.conf, conf-available/enabled, sites-*, mods-*, conf.d, unknown locations.
 stage_detect_existing_md() {
     cb_sep
     local my_name; my_name=$(basename "$CB_MOD_MD_CONF" .conf)
@@ -264,98 +317,106 @@ stage_detect_existing_md() {
 
     sources=$(cb_apache_md_sources 2>/dev/null || true)
     if [[ -z "$sources" ]]; then
-        cb_ok "Zadna kolizni MDomain konfigurace nenalezena"
+        cb_ok "No conflicting MDomain configuration found"
         return 0
     fi
 
-    # Filtrovani: soubory ktere patri k nasemu configu preskocime
+    # Filtering: skip files that belong to our config
     local cat path enabled
     local -a dangerous=()
     while IFS=$'\t' read -r cat path enabled; do
         [[ -z "$path" ]] && continue
-        # Nas vlastni soubor
+        # Our own file
         [[ "$(basename "$path" .conf)" == "$my_name" ]] && continue
-        # .bak/.disabled atp. nevadi
+        # .bak/.disabled etc. are fine
         [[ "$cat" == "disabled" ]] && continue
         dangerous+=("$cat|$path|$enabled")
     done <<< "$sources"
 
     if (( ${#dangerous[@]} == 0 )); then
-        cb_ok "Zadna kolizni MDomain konfigurace nenalezena (jen bak/disabled)"
+        cb_ok "No conflicting MDomain configuration found (only bak/disabled)"
         return 0
     fi
 
-    cb_warn "Nalezeno ${#dangerous[@]} mist s MDomain:"
+    cb_warn "Found ${#dangerous[@]} locations with MDomain:"
     local item
     for item in "${dangerous[@]}"; do
         IFS='|' read -r cat path enabled <<< "$item"
         printf '    [%-16s enabled=%s] %s\n' "$cat" "$enabled" "$path"
     done
 
-    if ! cb_ask_yn "Automaticky deaktivovat/zakomentovat vsechna tato mista?" "Y/n"; then
-        cb_die "Bez deaktivace dojde ke kolizi MDomain (AH10038 nebo duplicita)"
+    if ! cb_ask_yn "Automatically deactivate/comment out all these locations?" "Y/n"; then
+        cb_die "Without deactivation there will be an MDomain collision (AH10038 or duplication)"
     fi
 
     for item in "${dangerous[@]}"; do
         IFS='|' read -r cat path enabled <<< "$item"
-        cb_apache_disable_md_source "$cat" "$path" || cb_warn "Nelze deaktivovat: $path"
+        cb_apache_disable_md_source "$cat" "$path" || cb_warn "Cannot deactivate: $path"
     done
-    cb_ok "Kolizni MDomain deaktivovany"
+    cb_ok "Conflicting MDomain entries deactivated"
 }
 
 stage_cleanup_staging_data() {
-    local MD_BASE="/etc/apache2/md"
+    local MD_BASE="$_APACHE_MD_STORE"
     [[ -d "$MD_BASE" ]] || return 0
     if [[ "$CB_STAGING" == "1" ]]; then
-        cb_debug "Staging rezim aktivni, neciste data"
+        cb_debug "Staging mode active, keeping data"
         return 0
     fi
     cb_sep
     if grep -Riq "acme-staging" "$MD_BASE/domains" 2>/dev/null; then
-        cb_warn "Nalezena staging data v $MD_BASE/domains - mazu"
+        cb_warn "Found staging data in $MD_BASE/domains - deleting"
         [[ "$CB_DRY_RUN" == "0" ]] && rm -rf "$MD_BASE/domains"/* "$MD_BASE/tmp"/* "$MD_BASE/archive"/* 2>/dev/null
-        cb_ok "Staging data vyciztena"
+        cb_ok "Staging data cleaned"
     fi
 }
 
 get_enabled_sites() {
-    find "$CB_APACHE_ENABLED_DIR" -type l -exec readlink -f {} + 2>/dev/null | \
-        grep "$CB_APACHE_CONF_DIR" | sort -u
+    if (( _APACHE_HAS_A2EN )); then
+        find "$CB_APACHE_ENABLED_DIR" -type l -exec readlink -f {} + 2>/dev/null | \
+            grep "$CB_APACHE_CONF_DIR" | sort -u
+    else
+        find "$CB_APACHE_CONF_DIR" -maxdepth 1 -name '*.conf' -type f 2>/dev/null | sort -u
+    fi
 }
 
 stage_find_domains() {
     cb_sep
 
-    # Pokud admin predal domeny pres flagy/config, nebrouzdame vhosty
+    # If admin provided domains via flags/config, we don't browse vhosts
     local _seen=""
     if [[ -n "$CB_DOMAINS" ]]; then
         for d in $CB_DOMAINS; do
-            cb_validate_domain "$d" || { cb_warn "Ignoruji neplatnou domenu: $d"; continue; }
+            cb_validate_domain "$d" || { cb_warn "Ignoring invalid domain: $d"; continue; }
             [[ " $_seen " == *" $d "* ]] && continue
             if [[ "$d" != \** ]] && ! cb_domain_points_here "$d"; then
-                cb_warn "DNS A/AAAA pro $d nemiri na tento server - HTTP-01 challenge muze selhat."
-                cb_warn "  (Pokracuji - rezi-li bezet za NAT/LB, pouzij --skip-dns-check pro tise.)"
+                cb_warn "DNS A/AAAA for $d does not point to this server - HTTP-01 challenge may fail."
+                cb_warn "  (Continuing - if behind NAT/LB, use --skip-dns-check to suppress this warning.)"
             fi
             VALID_DOMAINS+=("$d")
             _seen="$_seen $d"
         done
         if (( ${#VALID_DOMAINS[@]} == 0 )); then
-            cb_die "Zadna validni domena v CB_DOMAINS"
+            cb_die "No valid domain in CB_DOMAINS"
         fi
-        cb_log "Domeny z konfigurace: ${VALID_DOMAINS[*]}"
+        cb_log "Domains from configuration: ${VALID_DOMAINS[*]}"
         printf "%s\n" "${VALID_DOMAINS[@]}" > "$CB_VALID_DOMAINS_FILE"
         return 0
     fi
 
-    # Jinak autodetekce z vhostu
+    # Otherwise auto-detect from vhosts
     if [[ -z "$(ls -A "$CB_APACHE_ENABLED_DIR" 2>/dev/null)" ]]; then
-        cb_die "V $CB_APACHE_ENABLED_DIR nejsou aktivovane stranky (a2ensite NAME)"
+        if (( _APACHE_HAS_A2EN )); then
+            cb_die "No enabled sites in $CB_APACHE_ENABLED_DIR (a2ensite NAME)"
+        else
+            cb_die "No *.conf files in $CB_APACHE_CONF_DIR"
+        fi
     fi
 
-    cb_log "Hledam domeny v $CB_APACHE_ENABLED_DIR"
+    cb_log "Searching for domains in $CB_APACHE_ENABLED_DIR"
     local ENABLED_SITES DOMAIN_LIST HOSTNAME_FQ UNIQUE_DOMAINS
     ENABLED_SITES=$(get_enabled_sites)
-    # shellcheck disable=SC2086  # $ENABLED_SITES je zamerne nequotovany (vice cest)
+    # shellcheck disable=SC2086  # $ENABLED_SITES is intentionally unquoted (multiple paths)
     DOMAIN_LIST=$(grep -hE '^\s*Server(Name|Alias)\s+' $ENABLED_SITES 2>/dev/null | \
         awk '{for(i=2;i<=NF;i++) print $i}')
     HOSTNAME_FQ=$(hostname -f 2>/dev/null)
@@ -391,33 +452,38 @@ stage_find_domains() {
 stage_enable_modules() {
     cb_sep
     local mods m
-    mods=$("$APACHECTL" -M 2>&1)
+    mods=$(_cb_apache_list_modules 2>&1)
     for m in md ssl; do
         if echo "$mods" | grep -q "${m}_module"; then
-            cb_debug "Modul '$m' aktivni"
+            cb_debug "Module '$m' active"
         else
-            cb_log "Povoluji modul '$m'"
-            [[ "$CB_DRY_RUN" == "0" ]] && a2enmod "$m" >/dev/null 2>&1
+            cb_log "Enabling module '$m'"
+            if [[ "$CB_DRY_RUN" == "0" ]]; then
+                if (( _APACHE_HAS_A2EN )); then
+                    a2enmod "$m" >/dev/null 2>&1
+                fi
+            fi
         fi
     done
-    # Po a2enmod overit ze modul je doopravdy nactitelny (apache2ctl -M
-    # nacita celou config, takze pokud chybi knihovny / jine konflikty,
-    # uvidime tady; lepsi nez chyba pri reloadu po nakonfigurovani MDomain).
     if [[ "$CB_DRY_RUN" == "0" ]]; then
-        local check; check=$("$APACHECTL" -M 2>&1)
+        local check; check=$(_cb_apache_list_modules 2>&1)
         if ! echo "$check" | grep -q 'md_module'; then
-            cb_error "mod_md neni nactitelny po a2enmod md."
-            cb_log "  Mozne priciny:"
-            cb_log "    - balicek libapache2-mod-md neni instalovan (apt install libapache2-mod-md)"
-            cb_log "    - Apache <2.4.34 (Ubuntu 18.04: upgrade na bionic-backports)"
-            cb_log "    - jiny modul drzi konflikt s mod_md (apache2ctl -M | grep md)"
-            cb_log "  Restart bez mod_md:  a2dismod md && systemctl reload apache2"
-            cb_die "mod_md nedostupny"
+            cb_error "mod_md is not loadable."
+            if (( _APACHE_HAS_A2EN )); then
+                cb_log "  Try: apt install libapache2-mod-md && a2enmod md"
+            else
+                cb_log "  Try: $_APACHE_PKG install $_APACHE_MOD_MD_PKG"
+            fi
+            cb_die "mod_md unavailable"
         fi
         if ! echo "$check" | grep -q 'ssl_module'; then
-            cb_error "mod_ssl neni nactitelny po a2enmod ssl."
-            cb_log "  Resime:  apt install --reinstall apache2-bin"
-            cb_die "mod_ssl nedostupny"
+            cb_error "mod_ssl is not loadable."
+            if (( _APACHE_HAS_A2EN )); then
+                cb_log "  Try: apt install --reinstall apache2-bin"
+            else
+                cb_log "  Try: dnf install mod_ssl"
+            fi
+            cb_die "mod_ssl unavailable"
         fi
     fi
 }
@@ -482,7 +548,7 @@ stage_generate_config() {
             echo "# CA: $CB_CA"
             echo "MDCertificateAgreement accepted"
             echo "MDomain $domains_line"
-            echo "MDContactEmail $email"
+            (( _APACHE_MD_HAS_CONTACT_EMAIL )) && echo "MDContactEmail $email"
             echo "MDMembers manual"
             echo "MDMessageCMD $CB_MOD_MD_HOOK_SCRIPT"
             [[ -n "$ca_url" ]] && echo "MDCertificateAuthority $ca_url"
@@ -491,27 +557,27 @@ stage_generate_config() {
             fi
         } > "$CB_MOD_MD_CONF"
         chmod 640 "$CB_MOD_MD_CONF"
-        chown root:www-data "$CB_MOD_MD_CONF" 2>/dev/null || true
+        chown "root:$_APACHE_USER" "$CB_MOD_MD_CONF" 2>/dev/null || true
     fi
-    cb_ok "Konfigurace: $CB_MOD_MD_CONF"
+    cb_ok "Configuration: $CB_MOD_MD_CONF"
 }
 
 stage_install_hook_adapter() {
     cb_sep
-    cb_log "Instaluji MDMessageCMD adapter -> $CB_MOD_MD_HOOK_SCRIPT"
+    cb_log "Installing MDMessageCMD adapter -> $CB_MOD_MD_HOOK_SCRIPT"
     if [[ "$CB_DRY_RUN" == "0" ]]; then
         local hook_dir; hook_dir="$(dirname "$CB_MOD_MD_HOOK_SCRIPT")"
         mkdir -p "$hook_dir"
-        # /opt/certberus i parent musi byt traverzovatelny pro www-data;
-        # jinak Apache (bezici jako www-data) MDMessageCMD volat nemuze
-        # a mod_md hlasi 'failed with exit code 255' = permission denied.
+        # /opt/certberus and parent must be traversable by www-data;
+        # otherwise Apache (running as www-data) cannot call MDMessageCMD
+        # and mod_md reports 'failed with exit code 255' = permission denied.
         chmod 0755 "$hook_dir" 2>/dev/null || true
         cb_mod_md_adapter_body > "$CB_MOD_MD_HOOK_SCRIPT"
-        # 0750 + group www-data = root muze editovat, www-data muze cist+exec
+        # 0750 + group www-data = root can edit, www-data can read+exec
         chmod 0750 "$CB_MOD_MD_HOOK_SCRIPT"
-        chown root:www-data "$CB_MOD_MD_HOOK_SCRIPT" 2>/dev/null || true
-        # CB_MOD_MD_DIR (mod_md store) zustava 0700 root:root - to apache
-        # nepotrebuje, mod_md tam zapisuje cesty pres jiny mechanismus.
+        chown "root:$_APACHE_USER" "$CB_MOD_MD_HOOK_SCRIPT" 2>/dev/null || true
+        # CB_MOD_MD_DIR (mod_md store) stays 0700 root:root - Apache
+        # does not need it, mod_md writes paths via a different mechanism.
     fi
     cb_ok "Hook adapter OK"
 }
@@ -519,12 +585,12 @@ stage_install_hook_adapter() {
 stage_sudoers() {
     local SUDOERS_FILE="/etc/sudoers.d/certberus_mod_md"
     local IPT APCH tmp
-    APCH=$(command -v apache2ctl || echo /usr/sbin/apache2ctl)
-    [[ -x "$APCH" ]] || cb_die "apache2ctl nenalezen"
+    APCH=$(command -v "$APACHECTL" 2>/dev/null || command -v apachectl 2>/dev/null || command -v apache2ctl 2>/dev/null || echo /usr/sbin/apachectl)
+    [[ -x "$APCH" ]] || cb_die "apachectl/apache2ctl not found"
 
-    # Sudoers pro port 80 ACCEPT dropdown ma smysl jen kdyz je backend iptables*.
-    # Pro firewalld/ufw/nft hook adapter pouzije firewall-cmd/ufw/nft (viz hooks).
-    # Pro 'none' backend zadna firewall mutace - sudoers jen graceful.
+    # Sudoers for port 80 ACCEPT dropdown only makes sense when the backend is iptables*.
+    # For firewalld/ufw/nft the hook adapter uses firewall-cmd/ufw/nft (see hooks).
+    # For 'none' backend no firewall mutation - sudoers for graceful only.
     local need_ipt=0
     case "$CB_FW_BACKEND" in
         iptables-nft|iptables-legacy)
@@ -542,12 +608,12 @@ stage_sudoers() {
         echo "# Certberus - rules for mod_md hook adapter"
         if (( need_ipt )); then
             cat <<EOF
-www-data ALL=(ALL) NOPASSWD: $IPT -A INPUT -p tcp --dport 80 -j ACCEPT -m comment --comment *
-www-data ALL=(ALL) NOPASSWD: $IPT -D INPUT -p tcp --dport 80 -j ACCEPT -m comment --comment *
-www-data ALL=(ALL) NOPASSWD: $IPT -C INPUT -p tcp --dport 80 -j ACCEPT -m comment --comment *
+$_APACHE_USER ALL=(ALL) NOPASSWD: $IPT -A INPUT -p tcp --dport 80 -j ACCEPT -m comment --comment *
+$_APACHE_USER ALL=(ALL) NOPASSWD: $IPT -D INPUT -p tcp --dport 80 -j ACCEPT -m comment --comment *
+$_APACHE_USER ALL=(ALL) NOPASSWD: $IPT -C INPUT -p tcp --dport 80 -j ACCEPT -m comment --comment *
 EOF
         fi
-        echo "www-data ALL=(ALL) NOPASSWD: $APCH graceful"
+        echo "$_APACHE_USER ALL=(ALL) NOPASSWD: $APCH graceful"
     } > "$tmp"
     if visudo -cf "$tmp" >/dev/null 2>&1; then
         mv "$tmp" "$SUDOERS_FILE"
@@ -562,8 +628,10 @@ EOF
 stage_enable_config() {
     cb_sep
     local name; name=$(basename "$CB_MOD_MD_CONF" .conf)
-    cb_log "Povoluji konf '$name'"
-    [[ "$CB_DRY_RUN" == "0" ]] && a2enconf "$name" >/dev/null 2>&1
+    cb_log "Enabling conf '$name'"
+    if [[ "$CB_DRY_RUN" == "0" ]] && (( _APACHE_HAS_A2EN )); then
+        a2enconf "$name" >/dev/null 2>&1
+    fi
 }
 
 stage_fix_ssl_vhosts() {
@@ -624,27 +692,38 @@ stage_firewall() {
     fi
 }
 
-# Pokud zadny enabled :443 vhost nema ServerName / ServerAlias odpovidajici
-# nasi primarni domene, mod_md sice cert vystavi do svoji store, ale Apache
-# ho nikdy nenacte protoze chybi vhost ktery by ho prevzal.
-# Vytvorime stub /etc/apache2/sites-available/certberus-ssl-<dom>.conf s
-# minimalnim SSL vhostem (snakeoil/fallback cert -> mod_md prepise pri
-# graceful) a a2ensite. Klic je 'ServerName' = matchne MDomain.
+stage_selinux() {
+    command -v getenforce >/dev/null 2>&1 || return 0
+    [[ "$(getenforce 2>/dev/null)" == "Enforcing" || "$(getenforce 2>/dev/null)" == "Permissive" ]] || return 0
+    local val
+    val=$(getsebool httpd_can_network_connect 2>/dev/null | awk '{print $NF}')
+    if [[ "$val" == "off" ]]; then
+        cb_log "SELinux: enabling httpd_can_network_connect (mod_md needs ACME)"
+        [[ "$CB_DRY_RUN" == "0" ]] && setsebool -P httpd_can_network_connect on
+    fi
+}
+
+# If no enabled :443 vhost has a ServerName / ServerAlias matching
+# our primary domain, mod_md will issue the cert into its store but Apache
+# will never load it because there is no vhost to pick it up.
+# We create a stub /etc/apache2/sites-available/certberus-ssl-<dom>.conf with
+# a minimal SSL vhost (snakeoil/fallback cert -> mod_md overwrites on
+# graceful) and a2ensite. The key is 'ServerName' = matches MDomain.
 stage_ensure_ssl_vhost() {
     cb_sep
-    cb_log "Kontrola existence :443 vhostu pro nase domeny"
+    cb_log "Checking for :443 vhosts matching our domains"
     readarray -t VALID_DOMAINS < "$CB_VALID_DOMAINS_FILE"
     local primary="${VALID_DOMAINS[0]:-}"
-    [[ -z "$primary" ]] && { cb_warn "Zadna primarni domena - preskakuji"; return 0; }
+    [[ -z "$primary" ]] && { cb_warn "No primary domain - skipping"; return 0; }
 
     local ENABLED_SITES f
     ENABLED_SITES=$(get_enabled_sites)
     local found_443_match=0
 
-    # Hledame :443 vhost ktery ma ServerName/Alias rovny aspon jedne nasi domene.
+    # Look for a :443 vhost with ServerName/Alias equal to at least one of our domains.
     for f in $ENABLED_SITES; do
         [[ -s "$f" ]] || continue
-        # Naivni single-vhost parser stacil pro detekci - 99% Debian deploymentu.
+        # Simple single-vhost parser sufficient for detection - 99% of Debian deployments.
         if grep -qE '^[^#]*<VirtualHost [^>]*:443>' "$f"; then
             local cfg_doms
             cfg_doms=$(grep -E "^\s*(ServerName|ServerAlias)\s+" "$f" 2>/dev/null \
@@ -689,21 +768,22 @@ stage_ensure_ssl_vhost() {
             openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
                 -subj "/CN=$primary/O=certberus-fallback" \
                 -keyout "$kf" -out "$cf" >/dev/null 2>&1 \
-                || { cb_warn "Nemohu vyrobit fallback cert"; cf=""; kf=""; }
+                || { cb_warn "Cannot generate fallback cert"; cf=""; kf=""; }
             chmod 0640 "$kf" 2>/dev/null
-            cb_log "Vyroben self-signed fallback: $cf"
+            command -v restorecon >/dev/null 2>&1 && restorecon "$cf" "$kf" 2>/dev/null
+            cb_log "Generated self-signed fallback: $cf"
         fi
     fi
 
-    # Stub vhost: SSL on, fallback cert (mod_md prepise), ServerName + ServerAlias
-    # vsech nasich domen aby SNI a MDomain matchnuly.
+    # Stub vhost: SSL on, fallback cert (mod_md will overwrite), ServerName + ServerAlias
+    # for all our domains so that SNI and MDomain match.
     local stub_conf="$CB_APACHE_CONF_DIR/certberus-ssl.conf"
     local stub_name="certberus-ssl"
     if [[ "$CB_DRY_RUN" == "0" ]]; then
-        local tmp; tmp=$(mktemp) || cb_die "mktemp selhal"
+        local tmp; tmp=$(mktemp) || cb_die "mktemp failed"
         {
-            echo "# Auto-generated by certberus. mod_md prepise SSLCertificate* po vystaveni."
-            echo "# Bezpecne smazat pokud mas vlastni :443 vhost s ServerName=$primary."
+            echo "# Auto-generated by certberus. mod_md will overwrite SSLCertificate* after issuance."
+            echo "# Safe to delete if you have your own :443 vhost with ServerName=$primary."
             echo "<VirtualHost *:443>"
             echo "    ServerName $primary"
             local i
@@ -724,7 +804,8 @@ stage_ensure_ssl_vhost() {
         fi
         mv "$tmp" "$stub_conf"
         chmod 0644 "$stub_conf"
-        a2ensite "$stub_name" >/dev/null 2>&1
+        command -v restorecon >/dev/null 2>&1 && restorecon "$stub_conf" 2>/dev/null
+        (( _APACHE_HAS_A2EN )) && a2ensite "$stub_name" >/dev/null 2>&1
         cb_ok "Stub :443 vhost: $stub_conf"
     else
         cb_log "[DRY-RUN] Would create $stub_conf with ServerName=$primary"
@@ -735,43 +816,42 @@ stage_test_reload() {
     cb_sep
     cb_run_hooks pre-reload
 
-    cb_log "Testuji syntaxi (apache2ctl -t)"
+    cb_log "Testing syntax (apache2ctl -t)"
     if ! "$APACHECTL" -t 2>&1 | tee -a "$CB_LOG_FILE"; then
-        cb_error "Syntax error v Apache konf PO nasich zmenach"
+        cb_error "Syntax error in Apache config AFTER our changes"
         if [[ "${CB_AUTO_ROLLBACK:-0}" == "1" ]]; then
             cb_snapshot_restore "$CB_LAST_SNAPSHOT"
         else
             cb_rollback_hint
         fi
-        cb_die "Abortuji bez reloadu (Apache zustava v puvodnim stavu)"
+        cb_die "Aborting without reload (Apache remains in original state)"
     fi
 
-    if ! cb_svc_is_active apache2; then
-        cb_warn "Apache nebezi - zkousim start"
-        if [[ "$CB_DRY_RUN" == "0" ]] && ! cb_svc_start apache2; then
-            # Start selhal - zkusime rollback a znovu
+    if ! cb_svc_is_active "$_APACHE_SVC"; then
+        cb_warn "Apache is not running - attempting start"
+        if [[ "$CB_DRY_RUN" == "0" ]] && ! cb_svc_start "$_APACHE_SVC"; then
             if [[ "${CB_AUTO_ROLLBACK:-0}" == "1" ]]; then
-                cb_error "Apache start selhal - zkousim rollback a znovu"
+                cb_error "Apache start failed - attempting rollback and retry"
                 cb_snapshot_restore "$CB_LAST_SNAPSHOT"
-                cb_svc_start apache2 || cb_die "Apache se nepodarilo nastartovat ani po rollbacku"
-                cb_die "Apache start po rollbacku OK, ale konfigurace se nenasadila"
+                cb_svc_start "$_APACHE_SVC" || cb_die "Apache could not be started even after rollback"
+                cb_die "Apache start after rollback OK, but configuration was not deployed"
             else
                 cb_rollback_hint
-                cb_die "Apache start selhal"
+                cb_die "Apache start failed"
             fi
         fi
     fi
 
     cb_log "Reload Apache"
     if [[ "$CB_DRY_RUN" == "0" ]]; then
-        if ! cb_svc_reload apache2; then
-            cb_error "Reload selhal"
+        if ! cb_svc_reload "$_APACHE_SVC"; then
+            cb_error "Reload failed"
             if [[ "${CB_AUTO_ROLLBACK:-0}" == "1" ]]; then
                 cb_snapshot_restore "$CB_LAST_SNAPSHOT"
-                cb_svc_reload apache2 || cb_svc_restart apache2 || cb_die "Apache neni opravitelny"
-                cb_die "Rollback hotov, puvodni stav zachovan"
+                cb_svc_reload "$_APACHE_SVC" || cb_svc_restart "$_APACHE_SVC" || cb_die "Apache is unrecoverable"
+                cb_die "Rollback done, original state preserved"
             fi
-            cb_svc_restart apache2 || cb_die "Apache restart selhal"
+            cb_svc_restart "$_APACHE_SVC" || cb_die "Apache restart failed"
         fi
     fi
     cb_ok "Apache OK"
@@ -820,7 +900,7 @@ stage_post_issue_activate() {
     local primary="${VALID_DOMAINS[0]:-}"
     [[ -z "$primary" ]] && return 0
 
-    local md_root="${CB_MOD_MD_APACHE_STORE_ROOT:-/etc/apache2/md}"
+    local md_root="${CB_MOD_MD_APACHE_STORE_ROOT:-$_APACHE_MD_STORE}"
     local staging_cert="$md_root/staging/$primary/pubcert.pem"
     local domains_cert="$md_root/domains/$primary/pubcert.pem"
     local timeout="${CB_POST_ISSUE_TIMEOUT:-120}"
@@ -844,23 +924,23 @@ stage_post_issue_activate() {
     done
 
     if [[ -s "$domains_cert" ]]; then
-        cb_ok "Cert v domains/ — hotovo"
+        cb_ok "Cert in domains/ — done"
         return 0
     fi
 
     if [[ ! -s "$staging_cert" ]]; then
-        cb_warn "ACME job se nedokoncil za ${timeout}s. Az dorazi cert do staging,"
-        cb_warn "  spust rucne: $APACHECTL graceful"
-        cb_warn "  (sleduj: tail -f /var/log/apache2/error.log | grep -i 'md\\[')"
+        cb_warn "ACME job did not complete in ${timeout}s. When the cert arrives in staging,"
+        cb_warn "  run manually: $APACHECTL graceful"
+        cb_warn "  (watch: tail -f $_APACHE_LOG_DIR/error.log | grep -i 'md\\[')"
         return 0
     fi
 
-    cb_ok "Cert v staging: $staging_cert"
-    cb_log "Druhy graceful Apache (mod_md migruje staging -> domains)"
+    cb_ok "Cert in staging: $staging_cert"
+    cb_log "Second Apache graceful (mod_md migrates staging -> domains)"
     if "$APACHECTL" graceful >>"$CB_LOG_FILE" 2>&1; then
         cb_ok "graceful OK - mod_md adapter receives 'renewed' + 'installed' event"
     else
-        cb_warn "graceful selhal - zkus rucne: $APACHECTL graceful"
+        cb_warn "graceful failed - try manually: $APACHECTL graceful"
     fi
 }
 
@@ -906,28 +986,29 @@ main() {
     run_stage fix_ssl_vhosts
     run_stage ensure_ssl_vhost
     run_stage firewall
+    run_stage selinux
     run_stage test_reload
     run_stage post_issue_activate
     cb_run_hooks post-issue
     cb_sep
-    cb_ok "Hotovo. Domeny: ${VALID_DOMAINS[*]}"
+    cb_ok "Done. Domains: ${VALID_DOMAINS[*]}"
     cb_log "Log: $CB_LOG_FILE"
-    [[ "$CB_STAGING" == "1" ]] && cb_warn "STAGING rezim - cert neni duveryhodny v prohlizeci"
+    [[ "$CB_STAGING" == "1" ]] && cb_warn "STAGING mode - cert is not trusted in browsers"
 
-    # Co dal: mod_md ziskava certifikat ASYNCHRONNE az PO reloadu Apache.
-    # Prvni ziskani trva typicky 10-60s, nekdy i nekolik minut.
+    # Next steps: mod_md obtains the certificate ASYNCHRONOUSLY AFTER Apache reload.
+    # First issuance typically takes 10-60s, sometimes several minutes.
     cb_sep
     local _first="${VALID_DOMAINS[0]}"
-    cb_log "Dalsi kroky (mod_md zadava cert ASYNCHRONNE - typicky 10-60s):"
+    cb_log "Next steps (mod_md requests cert ASYNCHRONOUSLY - typically 10-60s):"
     cb_log ""
-    cb_log "  Pockej par sekund a pak:"
+    cb_log "  Wait a few seconds then:"
     cb_log "    certberus cert-info ${_first}"
     cb_log ""
-    cb_log "  Sledovat prubeh:"
-    cb_log "    tail -f /var/log/apache2/error.log | grep -i 'md\\['"
+    cb_log "  Watch progress:"
+    cb_log "    tail -f $_APACHE_LOG_DIR/error.log | grep -i 'md\\['"
     cb_log ""
-    cb_log "  Pokud cert do 5 minut nedorazi:"
-    cb_log "    certberus test-domain ${_first}     # zkontroluje DNS, CAA, port 80"
+    cb_log "  If cert does not arrive within 5 minutes:"
+    cb_log "    certberus test-domain ${_first}     # checks DNS, CAA, port 80"
 }
 
 main "$@"

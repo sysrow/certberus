@@ -169,14 +169,15 @@ cb_apache_fix_ssl_cert_paths() {
                 openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
                     -keyout "$snake_key" -out "$snake_cert" \
                     -subj "/CN=certberus-fallback" >/dev/null 2>&1 && \
-                    chmod 600 "$snake_key"
+                    chmod 600 "$snake_key" && \
+                    command -v restorecon >/dev/null 2>&1 && restorecon "$snake_cert" "$snake_key" 2>/dev/null
             fi
         fi
     fi
 
     local files f
-    mapfile -t files < <(find "$apache_root/sites-enabled" "$apache_root/conf-enabled" \
-        -maxdepth 2 -type l -o -type f 2>/dev/null | sort -u)
+    mapfile -t files < <(find "$apache_root/sites-enabled" "$apache_root/conf-enabled" "$apache_root/conf.d" \
+        -maxdepth 2 \( -type l -o -type f \) 2>/dev/null | sort -u)
 
     for f in "${files[@]}"; do
         [[ -r "$f" ]] || continue
@@ -220,7 +221,7 @@ cb_apache_fix_ssl_cert_paths() {
 cb_apache_find_broken_symlinks() {
     local root="${1:-/etc/apache2}"
     [[ -d "$root" ]] || return 0
-    find "$root"/sites-enabled "$root"/conf-enabled "$root"/mods-enabled \
+    find "$root"/sites-enabled "$root"/conf-enabled "$root"/mods-enabled "$root"/conf.d \
         -maxdepth 1 -xtype l 2>/dev/null
 }
 
@@ -345,7 +346,7 @@ cb_preflight_apache() {
                 [[ -r "$p" ]] && continue
                 bad_paths="${bad_paths}  $real: $p\n"
             done < <(grep -hE '^\s*SSLCertificate(File|KeyFile)\s+' "$real" 2>/dev/null | awk '{print $2}')
-        done < <(find "$apache_root"/sites-enabled "$apache_root"/conf-enabled \
+        done < <(find "$apache_root"/sites-enabled "$apache_root"/conf-enabled "$apache_root"/conf.d \
                     -maxdepth 2 \( -type l -o -type f \) 2>/dev/null)
 
         if [[ -n "$bad_paths" ]]; then

@@ -68,40 +68,40 @@ for ev in pre-install post-install pre-snapshot post-snapshot \
 done
 
 # Lib
-echo "Instaluji lib/"
+echo "Installing lib/"
 for f in common.sh os.sh dns.sh firewall.sh hooks.sh discover.sh preflight.sh; do
     install -m 0644 "$SRC/lib/$f" "$PREFIX/lib/certberus/$f"
 done
 
 # Webservers
-echo "Instaluji webservers/"
-for f in apache-md.sh apache-md-eab.sh nginx-certbot.sh tomcat-certbot.sh; do
+echo "Installing webservers/"
+for f in apache-md.sh apache-md-eab.sh nginx-certbot.sh tomcat-certbot.sh certbot-only.sh jetty-certbot.sh caddy.sh; do
     install -m 0755 "$SRC/webservers/$f" "$PREFIX/lib/certberus/webservers/$f"
 done
 
 # Bin
-echo "Instaluji bin/certberus"
+echo "Installing bin/certberus"
 install -m 0755 "$SRC/bin/certberus" "$PREFIX/sbin/certberus"
 
-# Config (nepreplatnovat existujici)
+# Config (do not overwrite existing)
 if [[ ! -f "$ETC/config.env" ]]; then
-    echo "Instaluji $ETC/config.env"
+    echo "Installing $ETC/config.env"
     install -m 0640 "$SRC/config/config.env.example" "$ETC/config.env"
 else
-    echo "Config $ETC/config.env jiz existuje - ponecham."
+    echo "Config $ETC/config.env already exists — keeping it."
 fi
 if [[ ! -f "$ETC/advanced.env" ]]; then
     install -m 0640 "$SRC/config/advanced.env.example" "$ETC/advanced.env"
 fi
 
-# Examples hooks
-echo "Instaluji priklady hooku do $ETC/hooks/examples/"
+# Example hooks
+echo "Installing example hooks to $ETC/hooks/examples/"
 install -d -m 0755 "$ETC/hooks/examples"
 cp -R "$SRC/hooks/examples/." "$ETC/hooks/examples/" 2>/dev/null || true
 find "$ETC/hooks/examples" -type f -name '*.sh.example' -exec chmod 0644 {} \;
 install -m 0644 "$SRC/hooks/README.md" "$ETC/hooks/README.md"
 
-# Syslog/logrotate volitelne
+# Syslog/logrotate (optional)
 if [[ -d /etc/logrotate.d ]]; then
     cat > /etc/logrotate.d/certberus <<EOF
 /var/log/certberus/*.log {

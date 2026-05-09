@@ -29,9 +29,21 @@ cb_load_config
 
 : "${CB_NGINX_CONF_DIR:=/etc/nginx}"
 : "${CB_NGINX_WEBROOT:=}"
-: "${CB_NGINX_SITES_AVAILABLE:=$CB_NGINX_CONF_DIR/sites-available}"
-: "${CB_NGINX_SITES_ENABLED:=$CB_NGINX_CONF_DIR/sites-enabled}"
 : "${CB_CERTBOT_HOOK_DIR:=/etc/letsencrypt/renewal-hooks/deploy}"
+
+# OS-dispatch: Debian uses sites-available/sites-enabled, RHEL uses conf.d
+case "$CB_OS_ID" in
+    debian|ubuntu)
+        _NGINX_HAS_SITES=1
+        : "${CB_NGINX_SITES_AVAILABLE:=$CB_NGINX_CONF_DIR/sites-available}"
+        : "${CB_NGINX_SITES_ENABLED:=$CB_NGINX_CONF_DIR/sites-enabled}"
+        ;;
+    *)
+        _NGINX_HAS_SITES=0
+        : "${CB_NGINX_SITES_AVAILABLE:=$CB_NGINX_CONF_DIR/conf.d}"
+        : "${CB_NGINX_SITES_ENABLED:=$CB_NGINX_CONF_DIR/conf.d}"
+        ;;
+esac
 
 CB_CA="${CB_CA:-letsencrypt}"
 CB_DOMAINS="${CB_DOMAINS:-}"
@@ -126,7 +138,6 @@ parse_args() {
 stage_prepare() {
     cb_banner "Certberus / nginx / certbot"
     cb_require_root
-    cb_require_os debian ubuntu
     cb_hook_context nginx ""
     mkdir -p "$CB_LOG_DIR" "$CB_CERTBOT_HOOK_DIR" "$CB_STATE_DIR" 2>/dev/null
     # Detect nginx document root (if --webroot was not specified explicitly)
@@ -134,10 +145,11 @@ stage_prepare() {
         CB_NGINX_WEBROOT=$(nginx -T 2>/dev/null \
             | awk '
             /^[[:space:]]*#/ { next }
-            /\{/ { depth++; if (depth==1 && /server[[:space:]]*\{/) { in_s=1; has80=0; r="" } }
-            in_s && depth==1 && /listen[[:space:]]/ && /80/ { has80=1 }
-            in_s && depth==1 && /^[[:space:]]*root[[:space:]]/ { r=$2; gsub(/;/,"",r) }
-            /\}/ { if (in_s && depth==1 && has80 && r) { print r; exit }; if (depth==1) { in_s=0 }; depth-- }
+            /\{/ { depth++ }
+            /server[[:space:]]*\{/ { in_s=1; sd=depth; has80=0; r="" }
+            in_s && depth==sd && /listen[[:space:]]/ && /80/ { has80=1 }
+            in_s && depth==sd && /^[[:space:]]*root[[:space:]]/ { r=$2; gsub(/;/,"",r) }
+            /\}/ { if (in_s && depth==sd && has80 && r) { print r; exit }; if (depth==sd) in_s=0; depth-- }
             ')
         [[ -z "$CB_NGINX_WEBROOT" ]] && CB_NGINX_WEBROOT="/var/www/html"
         cb_debug "Nginx document root: $CB_NGINX_WEBROOT"
@@ -349,18 +361,18 @@ stage_firewall() {
 
 stage_nginx_acme_location() {
     cb_sep
-    # Migrace: odstranit pozustatky stareho snippetoveho pristupu (<=0.1.16)
+    # Migration: remove remnants of old snippet approach (<=0.1.16)
     local snippet="/etc/nginx/snippets/certberus-acme.conf"
     if [[ -f "$snippet" ]]; then
-        cb_log "Odstranuji zastaraly ACME snippet: $snippet"
+        cb_log "Removing obsolete ACME snippet: $snippet"
         [[ "$CB_DRY_RUN" == "0" ]] && rm -f "$snippet"
     fi
-    # Odstranit include radky z nginx configu
+    # Remove include lines from nginx config
     local f
-    for f in /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
+    for f in "$CB_NGINX_SITES_ENABLED"/* "$CB_NGINX_CONF_DIR"/conf.d/*.conf; do
         [[ -f "$f" ]] || continue
-        if grep -q 'certberus-acme\.conf' "$f" 2>/dev/null; then
-            cb_log "Odstranuji zastaraly include z $f"
+        if grep 'certberus-acme\.conf' "$f" 2>/dev/null; then >/dev/null
+            cb_log "Removing obsolete include from $f"
             [[ "$CB_DRY_RUN" == "0" ]] && sed -i '/certberus-acme\.conf/d' "$f"
         fi
     done
@@ -469,30 +481,30 @@ stage_issue_cert() {
             ;;
     esac
 
-    # EAB validace
+    # EAB validation
     if [[ "$CB_EAB_REQUIRED" == "1" ]]; then
         [[ -n "$CB_EAB_KID" ]] || CB_EAB_KID=$(cb_ask_in "EAB KID" "")
         [[ -n "$CB_EAB_HMAC" ]] || CB_EAB_HMAC=$(cb_ask_secret "EAB HMAC")
-        [[ -n "$CB_EAB_KID" && -n "$CB_EAB_HMAC" ]] || cb_die "CA $CB_CA vyzaduje EAB"
+        [[ -n "$CB_EAB_KID" && -n "$CB_EAB_HMAC" ]] || cb_die "CA $CB_CA requires EAB"
     fi
 
-    # Spolecne args pro vsechna certbot volani
+    # Common args for all certbot invocations
     local -a common_args=(--email "$CB_EMAIL" --agree-tos --no-eff-email \
                           --non-interactive --keep-until-expiring)
     [[ -n "$acme_url" ]] && common_args+=(--server "$acme_url")
     [[ "$CB_EAB_REQUIRED" == "1" ]] && common_args+=(--eab-kid "$CB_EAB_KID" --eab-hmac-key "$CB_EAB_HMAC")
     [[ "$CB_DRY_RUN" == "1" ]] && common_args+=(--dry-run)
 
-    # Detekce dostupnosti certbot-nginx pluginu (pro nove domeny)
+    # Detect availability of certbot-nginx plugin (for new domains)
     local _cb_has_nginx_plugin=0
-    if certbot plugins 2>/dev/null | grep -q 'nginx'; then
+    if certbot plugins 2>/dev/null | grep 'nginx'; then >/dev/null
         _cb_has_nginx_plugin=1
     fi
 
-    # Seskupeni domen podle existujiciho certbot authenticatoru.
-    # Domeny se stejnym (authenticator, webroot_path) jdou do jednoho certbot volani.
-    # Nove domeny (bez renewal config) pouziji --nginx pokud je plugin k dispozici,
-    # jinak fallback na --webroot s CB_NGINX_WEBROOT.
+    # Group domains by existing certbot authenticator.
+    # Domains with the same (authenticator, webroot_path) go into one certbot invocation.
+    # New domains (without renewal config) use --nginx if the plugin is available,
+    # otherwise fall back to --webroot with CB_NGINX_WEBROOT.
     local -a group_keys=()
     declare -A domain_groups=()
     local d auth_info auth wrpath group_key
@@ -607,25 +619,25 @@ stage_issue_cert() {
 
 stage_inject_nginx_ssl() {
     cb_sep
-    # Tohle je volitelne - skript muze jen vydat cert a nechat nginx konfiguraci na adminu.
-    # Nasleduje minimalni pridani ssl_certificate direktiv pokud chybi.
+    # This is optional - the script can just issue the cert and leave nginx config to the admin.
+    # Below is a minimal addition of ssl_certificate directives if missing.
     local primary="${VALID_DOMAINS[0]}"
     local live_dir="/etc/letsencrypt/live/$primary"
     if [[ ! -d "$live_dir" && "$CB_DRY_RUN" == "0" ]]; then
-        cb_warn "Zdaleka neni jiste, ze $live_dir existuje - preskakuji injekci"
+        cb_warn "Not certain $live_dir exists - skipping injection"
         return 0
     fi
-    cb_log "Konfigurace HTTPS pro nginx (cesty: $live_dir)"
-    cb_log "Tip: pro plnou konfiguraci spravte sites-available/ rucne - skript pouze vydava cert."
-    cb_log "Cert bude automaticky reloadovan pri renewalu pres deploy hook."
+    cb_log "HTTPS configuration for nginx (paths: $live_dir)"
+    cb_log "Tip: for full configuration, edit sites-available/ manually - this script only issues the cert."
+    cb_log "Cert will be automatically reloaded on renewal via deploy hook."
 }
 
 stage_enable_timer() {
     # certbot.timer (systemd)
-    if systemctl list-unit-files 2>/dev/null | grep -q '^certbot\.timer'; then
-        systemctl enable --now certbot.timer >/dev/null 2>&1 && cb_ok "certbot.timer aktivovan"
-    elif systemctl list-unit-files 2>/dev/null | grep -q '^snap.certbot.renew.timer'; then
-        systemctl enable --now snap.certbot.renew.timer >/dev/null 2>&1 && cb_ok "snap certbot.renew.timer"
+    if systemctl list-unit-files 2>/dev/null | grep '^certbot\.timer'; then >/dev/null
+        systemctl enable --now certbot.timer >/dev/null 2>&1 && cb_ok "certbot.timer enabled"
+    elif systemctl list-unit-files 2>/dev/null | grep '^snap.certbot.renew.timer'; then >/dev/null
+        systemctl enable --now snap.certbot.renew.timer >/dev/null 2>&1 && cb_ok "snap certbot.renew.timer enabled"
     fi
 }
 
@@ -666,39 +678,40 @@ stage_test_reload() {
     printf '%s\n' "$test_out" | tee -a "$CB_LOG_FILE"
     if (( test_rc != 0 )); then
         if [[ "$CB_DRY_RUN" == "1" && "${_CB_NGINX_BASELINE_CERT_ONLY:-0}" == "1" ]] && cb_nginx_error_is_missing_cert "$test_out"; then
-            cb_warn "[dry-run] nginx -t stale selhava kvuli chybejicimu certu; v realnem behu by Certberus vygeneroval placeholder pred reloadem."
+            cb_warn "[dry-run] nginx -t still fails due to missing cert; in a real run Certberus would generate a placeholder before reload."
             return 0
         fi
-        # Baseline uz pri preflight selhaval - chyba neni nase.
+        # Baseline was already failing at preflight - the error is not ours.
         if [[ "${_CB_NGINX_BASELINE_OK:-1}" == "0" && "${_CB_NGINX_BASELINE_CERT_ONLY:-0}" != "1" ]]; then
-            cb_error "nginx -t selhava od zacatku (broken vhost mimo certberus). Opravte a opakujte."
-            cb_die "Zadna zmena nebyla provedena."
+            cb_error "nginx -t has been failing from the start (broken vhost outside certberus). Fix and retry."
+            cb_die "No changes were made."
         fi
-        # Pokud jsme jeste nic relevantniho nezmenili, problem neni v cert subsystému.
+        # If we have not changed anything relevant yet, the problem is not in the cert subsystem.
         if [[ "${_CB_MODIFIED_CONFIG:-0}" == "0" ]]; then
-            cb_error "nginx -t zacal selhavat mimo nase zmeny (viz preflight warningy)."
-            cb_die "Certberus nepokracuje. Zadna kriticka zmena nebyla provedena."
+            cb_error "nginx -t started failing outside our changes (see preflight warnings)."
+            cb_die "Certberus will not continue. No critical changes were made."
         fi
-        cb_error "nginx -t selhal after our changes"
+        cb_error "nginx -t failed after our changes"
         if [[ "${CB_AUTO_ROLLBACK:-0}" == "1" ]]; then
             cb_snapshot_restore "$CB_LAST_SNAPSHOT"
-            nginx -t 2>&1 | tee -a "$CB_LOG_FILE" || cb_die "Ani po rollbacku nejde nginx -t"
-            cb_die "Rollback hotov. Puvodni stav zachovan, cert neni nasazen."
+            nginx -t 2>&1 | tee -a "$CB_LOG_FILE" || cb_die "nginx -t still fails after rollback"
+            cb_die "Rollback done. Original state preserved, cert is not deployed."
         else
             cb_rollback_hint
-            cb_die "nginx -t selhal - ROLLBACK"
+            cb_die "nginx -t failed - ROLLBACK"
         fi
     fi
     cb_ok "nginx -t OK"
     if [[ "$CB_DRY_RUN" == "0" ]]; then
+        cb_svc_is_active nginx || cb_svc_start nginx
         if ! cb_svc_reload nginx; then
-            cb_error "nginx reload selhal"
+            cb_error "nginx reload failed"
             if [[ "${CB_AUTO_ROLLBACK:-0}" == "1" ]]; then
                 cb_snapshot_restore "$CB_LAST_SNAPSHOT"
-                cb_svc_reload nginx || cb_die "nginx je nefunkcni i po rollbacku"
-                cb_die "Rollback hotov."
+                cb_svc_reload nginx || cb_die "nginx is broken even after rollback"
+                cb_die "Rollback done."
             fi
-            cb_die "nginx reload selhal"
+            cb_die "nginx reload failed"
         fi
     fi
     cb_ok "nginx reload OK"
