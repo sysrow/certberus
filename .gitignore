@@ -1,4 +1,4 @@
-# Build artefakty
+# Build artifacts
 dist/
 *.deb
 *.rpm
@@ -18,10 +18,10 @@ tests/.tmp/
 .DS_Store
 Thumbs.db
 
-# Logy pri lokalnim vyvoji
+# Logs from local development
 *.log
 
-# Stale test session artefakty (mohou obsahovat hostnamy, IP, real ACME challenges)
+# Stale test session artifacts (may contain hostnames, IPs, real ACME challenges)
 e2e-logs/
 e2e-results/
 session-logs/

@@ -19,7 +19,7 @@ echo "--- T1.1: config.env is binary garbage ---"
 mkdir -p /etc/certberus
 dd if=/dev/urandom bs=256 count=1 2>/dev/null > /etc/certberus/config.env
 OUT=$(certberus status 2>&1); rc=$?
-if [[ $rc -eq 0 ]] || echo "$OUT" | grep -qiE "OS:|stav"; then
+if [[ $rc -eq 0 ]] || echo "$OUT" | grep -qiE "OS:|status"; then
     _pass "T1.1 survived binary config.env"
 else
     _fail "T1.1" "crash on binary config (rc=$rc)"
@@ -320,17 +320,18 @@ rm -rf /etc/letsencrypt
 echo; echo "=== CAT 5: Race Conditions & Concurrency ==="
 # ============================================================
 
-echo "--- T5.1: dva certberus auto soucasne (flock) ---"
-certberus auto --webserver certbot-only --domain race1.example.com --email a@a.com --staging -y -v >/tmp/race1.log 2>&1 &
-PID1=$!
+echo "--- T5.1: two certberus auto in parallel (flock) ---"
+# Hold the certberus lock externally via flock to guarantee the slot is occupied
+# while the second invocation tries to grab it.
+( flock 200; sleep 5 ) 200>/var/lock/certberus.lock &
+PID_LOCK=$!
 sleep 1
-OUT2=$(certberus auto --webserver certbot-only --domain race2.example.com --email a@a.com --staging -y -v 2>&1)
-wait $PID1
-RC1=$?
-if echo "$OUT2" | grep -qiE "locked\|flock\|another\|lock"; then
+OUT2=$(certberus auto --webserver certbot-only --domain race2.example.com --email a@a.com --staging -y --dry-run 2>&1); RC2=$?
+wait $PID_LOCK 2>/dev/null
+if echo "$OUT2" | grep -qiE "locked|flock|another|lock"; then
     _pass "T5.1 second certberus blocked by flock"
-elif [[ $RC1 -eq 0 ]]; then
-    _pass "T5.1 first certberus passed"
+elif [[ $RC2 -ne 0 ]]; then
+    _pass "T5.1 second certberus blocked (rc=$RC2)"
 else
     _fail "T5.1" "no flock detected"
 fi
@@ -393,23 +394,29 @@ OUT=$(certberus hooks list 2>&1); rc=$?
 [[ $rc -le 1 ]] && _pass "T6.7 hooks list without config does not crash" || _fail "T6.7" "crash (rc=$rc)"
 
 echo "--- T6.8: doctor when neither curl nor wget available ---"
-ORIG_PATH="$PATH"
-OUT=$(PATH=/usr/sbin:/sbin:/usr/bin certberus doctor 2>&1); rc=$?
-PATH="$ORIG_PATH"
+# Hide curl/wget binaries (renaming them so no PATH variant can find them).
+HID_T68=()
+for cmd in curl wget; do
+    p=$(command -v "$cmd" 2>/dev/null) || continue
+    [[ -f "$p" && ! -L "$p" ]] && mv "$p" "$p.cb_test_hidden" 2>/dev/null && HID_T68+=("$p")
+done
+OUT=$(certberus doctor 2>&1); rc=$?
+for p in "${HID_T68[@]}"; do mv "$p.cb_test_hidden" "$p" 2>/dev/null; done
 echo "$OUT" | grep -qiE "OS:" && _pass "T6.8 doctor without curl/wget does not crash" || _fail "T6.8" "crash"
 
 echo "--- T6.9: scan when openssl not available ---"
-ORIG_PATH="$PATH"
-OUT=$(PATH=/usr/sbin:/sbin certberus scan --no-fs --no-config 2>&1); rc=$?
-PATH="$ORIG_PATH"
+HID_T69=""
+p=$(command -v openssl 2>/dev/null) && [[ -f "$p" && ! -L "$p" ]] && mv "$p" "$p.cb_test_hidden" 2>/dev/null && HID_T69="$p"
+OUT=$(certberus scan --no-fs --no-config 2>&1); rc=$?
+[[ -n "$HID_T69" ]] && mv "$HID_T69.cb_test_hidden" "$HID_T69" 2>/dev/null
 [[ $rc -le 1 ]] && _pass "T6.9 scan without openssl does not crash" || _fail "T6.9" "crash (rc=$rc)"
 
-echo "--- T6.10: status s /etc/certberus owned by nobody ---"
+echo "--- T6.10: status with /etc/certberus owned by nobody ---"
 mkdir -p /etc/certberus
 chown nobody:nobody /etc/certberus 2>/dev/null || true
 OUT=$(certberus status 2>&1); rc=$?
 chown root:root /etc/certberus 2>/dev/null
-[[ $rc -le 1 ]] && _pass "T6.10 status s cizim ownerem does not crash" || _fail "T6.10" "crash"
+[[ $rc -le 1 ]] && _pass "T6.10 status with foreign owner does not crash" || _fail "T6.10" "crash"
 rm -rf /etc/certberus
 
 # ============================================================
@@ -440,7 +447,7 @@ echo "--- T7.6: null byte in domain ---"
 OUT=$(certberus auto --webserver certbot-only --domain "evil%00.example.com" --email a@a.com --staging --dry-run -y 2>&1); rc=$?
 [[ $rc -ne 0 ]] && _pass "T7.6 null byte rejected" || _fail "T7.6" "accepted"
 
-echo "--- T7.7: jen tecky ---"
+echo "--- T7.7: only dots ---"
 OUT=$(certberus auto --webserver certbot-only --domain "....." --email a@a.com --staging --dry-run -y 2>&1); rc=$?
 [[ $rc -ne 0 ]] && _pass "T7.7 dots rejected" || _fail "T7.7" "accepted"
 
@@ -504,9 +511,9 @@ OUT=$(certberus auto --webserver certbot-only --domain x.example.com --email 'a`
 echo; echo "=== CAT 9: Command Edge Cases ==="
 # ============================================================
 
-echo "--- T9.1: dvojity command (auto auto) ---"
+echo "--- T9.1: doubled command (auto auto) ---"
 OUT=$(certberus auto auto --dry-run 2>&1); rc=$?
-[[ $rc -le 2 ]] && _pass "T9.1 dvojity command does not crash" || _fail "T9.1" "crash (rc=$rc)"
+[[ $rc -le 2 ]] && _pass "T9.1 doubled command does not crash" || _fail "T9.1" "crash (rc=$rc)"
 
 echo "--- T9.2: command case-sensitive (AUTO) ---"
 OUT=$(certberus AUTO --dry-run 2>&1); rc=$?
@@ -518,7 +525,7 @@ OUT=$(certberus cert--info 2>&1); rc=$?
 
 echo "--- T9.4: certberus without arguments ---"
 OUT=$(certberus 2>&1); rc=$?
-echo "$OUT" | grep -qiE "pouziti|help|usage" && _pass "T9.4 without arguments shows help" || _fail "T9.4" "rc=$rc"
+echo "$OUT" | grep -qiE "help|usage" && _pass "T9.4 without arguments shows help" || _fail "T9.4" "rc=$rc"
 
 echo "--- T9.5: --help ---"
 OUT=$(certberus --help 2>&1); rc=$?
@@ -526,7 +533,8 @@ OUT=$(certberus --help 2>&1); rc=$?
 
 echo "--- T9.6: verbose version ---"
 OUT=$(certberus --verbose version 2>&1); rc=$?
-echo "$OUT" | grep -q "0.1.15" && _pass "T9.6 verbose version" || _fail "T9.6" "rc=$rc"
+# Match any semver-like version string (e.g. "0.1.20") rather than a hard-coded value.
+echo "$OUT" | grep -qE '[0-9]+\.[0-9]+\.[0-9]+' && _pass "T9.6 verbose version" || _fail "T9.6" "rc=$rc out=$OUT"
 
 echo "--- T9.7: scan --format unknown ---"
 OUT=$(certberus scan --format xml 2>&1); rc=$?
@@ -618,21 +626,21 @@ echo "--- T12.1: hook without exec permission ---"
 printf '#!/bin/bash\necho nope\n' > /etc/certberus/hooks/post-issue.d/10-noexec.sh
 chmod 644 /etc/certberus/hooks/post-issue.d/10-noexec.sh
 OUT=$(certberus hooks list 2>&1)
-echo "$OUT" | grep -q "10-noexec" && _fail "T12.1" "non-exec zobrazen" || _pass "T12.1 non-exec hook ignorovan"
+echo "$OUT" | grep -q "10-noexec" && _fail "T12.1" "non-exec listed" || _pass "T12.1 non-exec hook ignored"
 rm -f /etc/certberus/hooks/post-issue.d/10-noexec.sh
 
 echo "--- T12.2: .disabled hook ---"
 printf '#!/bin/bash\necho nope\n' > /etc/certberus/hooks/post-issue.d/10-skip.sh.disabled
 chmod +x /etc/certberus/hooks/post-issue.d/10-skip.sh.disabled
 OUT=$(certberus hooks list 2>&1)
-echo "$OUT" | grep -q "10-skip" && _fail "T12.2" ".disabled zobrazen" || _pass "T12.2 .disabled ignorovan"
+echo "$OUT" | grep -q "10-skip" && _fail "T12.2" ".disabled listed" || _pass "T12.2 .disabled ignored"
 rm -f /etc/certberus/hooks/post-issue.d/10-skip.sh.disabled
 
 echo "--- T12.3: .bak hook ---"
 printf '#!/bin/bash\necho nope\n' > /etc/certberus/hooks/post-issue.d/10-bak.sh.bak
 chmod +x /etc/certberus/hooks/post-issue.d/10-bak.sh.bak
 OUT=$(certberus hooks list 2>&1)
-echo "$OUT" | grep -q "10-bak" && _fail "T12.3" ".bak zobrazen" || _pass "T12.3 .bak ignorovan"
+echo "$OUT" | grep -q "10-bak" && _fail "T12.3" ".bak listed" || _pass "T12.3 .bak ignored"
 rm -f /etc/certberus/hooks/post-issue.d/10-bak.sh.bak
 
 echo "--- T12.4: hook with rc=42 ---"
@@ -662,7 +670,7 @@ for i in $(seq 10 59); do
 done
 OUT=$(certberus hooks list 2>&1); rc=$?
 COUNT=$(echo "$OUT" | grep -c "mass")
-[[ $COUNT -ge 40 ]] && _pass "T12.7 50 hooku zobrazeno ($COUNT)" || _fail "T12.7" "jen $COUNT hooku"
+[[ $COUNT -ge 40 ]] && _pass "T12.7 50 hooks listed ($COUNT)" || _fail "T12.7" "only $COUNT hooks"
 rm -f /etc/certberus/hooks/post-issue.d/*-mass.sh
 
 # ============================================================
