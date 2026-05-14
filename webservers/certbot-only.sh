@@ -245,13 +245,42 @@ stage_issue_cert() {
         mkdir -p "$CB_CERTBOT_ONLY_WEBROOT/.well-known/acme-challenge" 2>/dev/null
         cb_log "Mode: webroot ($CB_CERTBOT_ONLY_WEBROOT)"
     elif _cb_port80_in_use; then
-        cb_error "Port 80 is in use and --webroot was not specified."
-        cb_log "  Solutions:"
-        cb_log "    A) Specify --webroot <directory> served by another service on port 80:"
-        cb_log "         certberus auto --webserver certbot-only --webroot /var/www/html --domain ${VALID_DOMAINS[0]}"
-        cb_log "    B) If port 80 is not needed, free it and run again."
-        cb_log "    C) Use an EAB CA (HARICA/ZeroSSL), where validation may not require port 80."
-        cb_die "Cannot continue without --webroot or a free port 80."
+        # Auto-detect webroot from the running webserver so the user does not
+        # have to specify it manually.
+        local _detected_root=""
+        if command -v nginx >/dev/null 2>&1; then
+            _detected_root=$(nginx -T 2>/dev/null | awk '
+                /^[[:space:]]*#/ { next }
+                /\{/ { depth++ }
+                /server[[:space:]]*\{/ { in_s=1; sd=depth; has80=0; r="" }
+                in_s && depth==sd && /listen[[:space:]]/ && /80/ { has80=1 }
+                in_s && depth==sd && /^[[:space:]]*root[[:space:]]/ { r=$2; gsub(/;/,"",r) }
+                /\}/ { if (in_s && depth==sd && has80 && r) { print r; exit }
+                       if (depth==sd) in_s=0; depth-- }
+            ' 2>/dev/null)
+        fi
+        if [[ -z "$_detected_root" ]]; then
+            for _ac in apache2ctl apachectl; do
+                command -v "$_ac" >/dev/null 2>&1 || continue
+                _detected_root=$("$_ac" -S 2>/dev/null | awk '/DocumentRoot/ {print $2; exit}')
+                [[ -n "$_detected_root" ]] && break
+            done
+        fi
+        if [[ -n "$_detected_root" ]]; then
+            CB_CERTBOT_ONLY_WEBROOT="$_detected_root"
+            auth_mode="webroot"
+            mkdir -p "$CB_CERTBOT_ONLY_WEBROOT/.well-known/acme-challenge" 2>/dev/null
+            cb_log "Mode: webroot (auto-detected: $CB_CERTBOT_ONLY_WEBROOT)"
+        elif cb_has_tty; then
+            local _wr
+            _wr=$(cb_ask_in "Port 80 is in use. Webroot dir for ACME challenge" "/var/www/html")
+            CB_CERTBOT_ONLY_WEBROOT="$_wr"
+            auth_mode="webroot"
+            mkdir -p "$CB_CERTBOT_ONLY_WEBROOT/.well-known/acme-challenge" 2>/dev/null
+            cb_log "Mode: webroot ($CB_CERTBOT_ONLY_WEBROOT)"
+        else
+            cb_die "Port 80 is in use. Specify --webroot <dir> served by the running webserver."
+        fi
     else
         auth_mode="standalone"
         cb_log "Mode: standalone (port 80 is free)"
@@ -378,7 +407,6 @@ main() {
     run_stage find_domains
     run_stage email
     run_stage install_deploy_hook
-    run_stage firewall
     run_stage issue_cert
     run_stage enable_timer
     cb_sep
