@@ -225,6 +225,16 @@ echo "=== Test 33: new CLI aliases do not crash ==="
 OUT=$("$CERTBERUS" help --no-firewall --open-firewall --webroot /tmp/acme --port80 webroot 2>&1)
 echo "$OUT" | grep -q 'Usage' && _pass "automation aliases accepted" || { _fail; echo "$OUT" | head -5; }
 
+echo "=== Test 33b: 'setup' alias routes to the install wizard ==="
+# 'setup' is the clearer primary name for 'install'/'interactive'. Verify the
+# dispatch routes it to cmd_install (which prints the 'interactive setup'
+# banner first thing). --dry-run makes this side-effect free.
+OUT=$(timeout 30 "$CERTBERUS" --dry-run --yes --webserver nginx --ca letsencrypt \
+        --email test@example.com setup --domain setup-alias-test.example.com 2>&1 || true)
+echo "$OUT" | grep -qi 'interactive setup' \
+    && _pass "'setup' dispatches to the install wizard" \
+    || { _fail; echo "$OUT" | head -8; }
+
 echo "=== Test 34: cb_apply_cli_set validates and exports ==="
 (
     source "$CERT_ROOT/lib/common.sh"

@@ -10,7 +10,7 @@
 #
 set -uo pipefail
 
-CB_VERSION="0.2.4"
+CB_VERSION="0.2.5"
 
 # Locate libraries - dev mode (repo) or installed mode
 _SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -57,13 +57,19 @@ Usage: certberus [GLOBAL] COMMAND [ARGS]
   │  MAIN COMMANDS                                                 │
   ╰───────────────────────────────────────────────────────────────╯
 
-  certberus interactive    Interactive wizard (asks about everything).
-                           Recommended for first-time setup.
-                           Alias: install
+  certberus setup          First-time wizard: pick webserver + CA, write
+                           config.env, AND issue the first certificate.
+                           Interactive; pass -y to run it unattended.
+                           Aliases: install, interactive
 
-  certberus auto           Fully automatic: auto-detect + issue/renew.
-                           No prompts, suitable for cron/CI.
+  certberus auto           Non-interactive issue/renew driven entirely by
+                           config.env. Idempotent - skips when the cert is
+                           still fresh - so it is safe to run from cron/CI.
                            Alias: run
+
+  Note: 'setup' and 'auto' both end up issuing/renewing the certificate.
+  The difference is the wizard + prompts ('setup', run once by a human) vs
+  the idempotent, config-driven, unattended path ('auto', for automation).
 
   ╭───────────────────────────────────────────────────────────────╮
   │  DIAGNOSTICS                                                    │
@@ -111,7 +117,7 @@ Usage: certberus [GLOBAL] COMMAND [ARGS]
   -t/--staging   -y/--yes   -n/--dry-run   -v/--verbose
 
 Examples:
-  certberus interactive                   # first setup - wizard
+  certberus setup                         # first-time wizard (configure + issue)
   certberus auto                          # production per config.env
   certberus auto --staging                # test without rate limits
   certberus auto --dry-run -v             # show what it would do, no changes
@@ -294,7 +300,7 @@ auto_discover_or_die() {
         cb_log "  certberus auto --email <your@email> --domain $_host"
         cb_log "  certberus auto --email <your@email> --domain a.example --domain b.example"
         cb_log ""
-        cb_log "Tip: 'certberus interactive' walks you through the setup (creates config.env)."
+        cb_log "Tip: 'certberus setup' walks you through the setup (creates config.env)."
         exit 2
     fi
 
@@ -673,7 +679,7 @@ cmd_auto() {
             cb_log "  ($CB_CONFIG_FILE does not exist — probably running from .bundle.)"
             cb_log "  Use --email, for example:"
             cb_log "    certberus auto --email admin@example.com --domain $(hostname -f 2>/dev/null || hostname 2>/dev/null || echo example.com)"
-            cb_log "  Or create $CB_CONFIG_FILE (see 'certberus interactive')."
+            cb_log "  Or create $CB_CONFIG_FILE (see 'certberus setup')."
         fi
         exit 2
     fi
@@ -765,11 +771,11 @@ cmd_issue_webserver() {
                 cb_error ""
                 cb_error "  certberus does NOT change the firewall unless you ask it to. Options:"
                 cb_error "    A) let certberus open tcp/80 (+443) for the issuance:"
-                cb_error "         certberus install --firewall"
+                cb_error "         certberus setup --firewall"
                 cb_error "    B) open tcp/80 yourself in the existing policy, then re-run"
                 cb_error "    C) proceed without touching the firewall (ACME keeps failing"
                 cb_error "       until tcp/80 is reachable - mod_md will retry):"
-                cb_error "         certberus install --no-firewall"
+                cb_error "         certberus setup --no-firewall"
                 cb_error "######################################################################"
                 # How to resolve the closed-firewall situation:
                 #   --no-firewall      -> explicit opt-out, proceed non-interactively
@@ -1222,7 +1228,7 @@ cmd_renew() {
 
     if (( any == 0 )); then
         cb_warn "No existing certificates to renew."
-        cb_log "  For first issuance, use 'certberus auto' or 'certberus interactive'."
+        cb_log "  For first issuance, use 'certberus auto' or 'certberus setup'."
     else
         cb_run_hooks post-renew
     fi
@@ -1299,11 +1305,11 @@ CMD="${CB_CMD:-help}"
 REMAINING=("$CMD" "${REMAINING[@]}")
 
 # -------- Concurrency lock --------
-# For mutative commands (issue/renew/install/revoke/rollback) we hold an exclusive
+# For mutative commands (issue/renew/setup/revoke/rollback) we hold an exclusive
 # flock on /var/lock/certberus.lock. Stale locks from crashed runs are released by OS
 # (flock(2) is bound to the process descriptor).
 case "$CMD" in
-    issue|renew|install|revoke|rollback|auto|run|interactive)
+    issue|renew|setup|install|interactive|revoke|rollback|auto|run)
         if [[ "${CB_DRY_RUN:-0}" != "1" && "${CB_NO_LOCK:-0}" != "1" ]]; then
             CB_LOCK_FILE="${CB_LOCK_FILE:-/var/lock/certberus.lock}"
             if command -v flock >/dev/null 2>&1; then
@@ -1325,7 +1331,7 @@ case "$CMD" in
 esac
 
 case "$CMD" in
-    interactive|install) cmd_install "$@" ;;
+    setup|install|interactive) cmd_install "$@" ;;
     auto|run)     cmd_auto "$@" ;;
     issue)       cmd_issue "$@" ;;
     renew)       cmd_renew "$@" ;;

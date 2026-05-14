@@ -138,7 +138,7 @@ chmod 0755 "$ETC" "$ETC/hooks" "$STATE" "$LOGDIR" "$BACKUPDIR"
 
 echo "certberus installed."
 echo "  Config:     $ETC/config.env"
-echo "  First run:  sudo certberus install"
+echo "  First run:  sudo certberus setup"
 
 exit 0
 POSTINST

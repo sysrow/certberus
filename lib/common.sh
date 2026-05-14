@@ -658,7 +658,7 @@ cb_svc_diagnose_start_failure() {
         cb_error "  Certberus will NOT auto-unmask (that decision is yours)."
         cb_error "  To allow it, run:"
         cb_error "    sudo systemctl unmask $svc"
-        cb_error "  Then re-run 'certberus install'."
+        cb_error "  Then re-run 'certberus setup'."
         return 0
     fi
     cb_error "Service '$svc' failed to start. Last 20 journal entries for $svc:"
