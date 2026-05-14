@@ -172,7 +172,20 @@ stage_install_packages() {
     local need=()
     cb_pkg_installed "$_APACHE_PKG" || need+=("$_APACHE_PKG")
     command -v openssl >/dev/null 2>&1 || need+=(openssl)
-    if (( _APACHE_HAS_A2EN == 0 )); then
+    if (( _APACHE_HAS_A2EN == 1 )); then
+        # Debian/Ubuntu: mod_md.so ships either built into apache2-bin
+        # (Debian 13 trixie / Ubuntu 24.04+) or in a separate
+        # libapache2-mod-md package (Debian 12 bookworm and older).
+        # Only request the package when (a) the .so is genuinely missing
+        # AND (b) the package exists in apt-cache — otherwise we would
+        # bail with "no installation candidate" on trixie where the .so
+        # is already provided by apache2-bin.
+        if [[ ! -f /usr/lib/apache2/modules/mod_md.so ]]; then
+            if apt-cache show "$_APACHE_MOD_MD_PKG" >/dev/null 2>&1; then
+                need+=("$_APACHE_MOD_MD_PKG")
+            fi
+        fi
+    else
         cb_pkg_installed "$_APACHE_MOD_MD_PKG" || need+=("$_APACHE_MOD_MD_PKG")
         cb_pkg_installed mod_ssl || need+=(mod_ssl)
     fi
@@ -180,6 +193,19 @@ stage_install_packages() {
     if (( ${#need[@]} > 0 )); then
         cb_log "Missing packages: ${need[*]}"
         if cb_ask_yn "Install?" "Y/n"; then
+            # Auto-heal missing /var/log/apache2. On Debian-family the apache2
+            # postinst calls `touch` against error.log without first running
+            # `mkdir -p`, so if a prior cleanup (or admin manually freeing
+            # disk space) removed the directory, the install fails with a
+            # confusing dpkg error and leaves apache2 unconfigured. Create
+            # the dir with the expected ownership before invoking apt-get.
+            if [[ "$CB_OS_ID" == debian || "$CB_OS_ID" == ubuntu ]] \
+                    && [[ ! -d "$_APACHE_LOG_DIR" ]]; then
+                cb_warn "$_APACHE_LOG_DIR missing — creating before package install (Debian postinst would otherwise fail)"
+                mkdir -p "$_APACHE_LOG_DIR"
+                chown root:adm "$_APACHE_LOG_DIR" 2>/dev/null
+                chmod 750 "$_APACHE_LOG_DIR" 2>/dev/null
+            fi
             cb_pkg_install "${need[@]}" || cb_die "Installation failed"
         else
             cb_die "Cannot continue without packages ${need[*]}"
@@ -634,6 +660,79 @@ stage_enable_config() {
     fi
 }
 
+stage_check_dup_vhosts() {
+    cb_sep
+    cb_log "Checking for duplicate :443 vhosts owning the same ServerName"
+    readarray -t VALID_DOMAINS < "$CB_VALID_DOMAINS_FILE"
+    local ENABLED_SITES d f m name target
+    ENABLED_SITES=$(get_enabled_sites)
+    local conflicts=0
+
+    for d in "${VALID_DOMAINS[@]}"; do
+        local matches=()
+        for f in $ENABLED_SITES; do
+            [[ -s "$f" ]] || continue
+            # Detect a <VirtualHost ...:443> ... </VirtualHost> block whose
+            # ServerName equals $d (literal). We scan with awk because mod_md
+            # itself does an exact, case-sensitive match and we must mirror
+            # that — duplicate vhosts with the same ServerName confuse mod_md
+            # into serving the 'Apache Managed Domain Fallback' placeholder.
+            if awk -v target="$d" '
+                BEGIN { in_443=0 }
+                /^[^#]*<VirtualHost[ \t]+[^>]*:443>/ { in_443=1; next }
+                in_443 && /^[^#]*<\/VirtualHost>/    { in_443=0; next }
+                in_443 && /^[[:space:]]*ServerName[[:space:]]/ {
+                    line=$0
+                    sub(/^[[:space:]]*ServerName[[:space:]]+/, "", line)
+                    sub(/#.*$/, "", line)
+                    gsub(/^[ \t]+|[ \t]+$/, "", line)
+                    n=split(line, names, /[ \t]+/)
+                    for (i=1;i<=n;i++) if (names[i]==target) { found=1; exit }
+                }
+                END { exit (found ? 0 : 1) }
+            ' "$f" 2>/dev/null; then
+                matches+=("$f")
+            fi
+        done
+        (( ${#matches[@]} > 1 )) || continue
+
+        cb_warn "Duplicate :443 vhost for ServerName '$d' in ${#matches[@]} files:"
+        for m in "${matches[@]}"; do cb_warn "    $m"; done
+        cb_warn "mod_md cannot decide which vhost owns the cert and will serve its"
+        cb_warn "'Apache Managed Domain Fallback' placeholder. Keeping the first,"
+        cb_warn "disabling the rest. Original .conf files are not deleted — only"
+        cb_warn "their enabled-symlinks are removed (a2dissite / .disabled rename)."
+
+        cb_log "  keep:    ${matches[0]}"
+        for m in "${matches[@]:1}"; do
+            if [[ "$CB_DRY_RUN" == "1" ]]; then
+                cb_log "  would-disable: $m"
+                continue
+            fi
+            name="$(basename "$m" .conf)"
+            if (( _APACHE_HAS_A2EN == 1 )) && command -v a2dissite >/dev/null 2>&1; then
+                if a2dissite "$name" >/dev/null 2>&1; then
+                    cb_ok "  disabled: $m  (a2dissite $name)"
+                else
+                    cb_warn "  could not a2dissite '$name' — please disable manually"
+                fi
+            else
+                target="${m}.disabled-by-certberus"
+                if mv "$m" "$target" 2>/dev/null; then
+                    cb_ok "  disabled: $m -> $target"
+                else
+                    cb_warn "  could not rename $m — please disable manually"
+                fi
+            fi
+        done
+        conflicts=$((conflicts + 1))
+    done
+
+    if (( conflicts == 0 )); then
+        cb_ok "No conflicting :443 vhosts found"
+    fi
+}
+
 stage_fix_ssl_vhosts() {
     cb_sep
     cb_log "Checking SSL configuration in vhosts"
@@ -679,6 +778,17 @@ stage_fix_ssl_vhosts() {
                     sed -i "/^[^#]*<VirtualHost [^>]*:443>/ a \\    SSLCertificateFile    $cf\\n    SSLCertificateKeyFile $kf" "$f"
                 cb_log "+ self-signed fallback -> $f (mod_md will overwrite after issuance)"
             fi
+        else
+            # mod_md provides the cert from MDStoreDir. A hardcoded
+            # SSLCertificateFile/SSLCertificateKeyFile in the :443 vhost
+            # blocks tls-alpn-01 (cert cannot be swapped during the TLS
+            # handshake) and pins Apache to a stale path after renewal.
+            # Comment them out so mod_md's SSL hook can take over.
+            (( backed )) || { cp "$f" "$f.bak_$ts"; backed=1; }
+            if [[ "$CB_DRY_RUN" == "0" ]]; then
+                sed -i -E '/^[^#]*<VirtualHost [^>]*:443>/,/^[^#]*<\/VirtualHost>/ s@^([[:space:]]*)(SSLCertificate(File|KeyFile)[[:space:]].*)$@\1# certberus: managed by mod_md (was): \2@' "$f"
+            fi
+            cb_log "Commented out hardcoded SSLCertificate* in :443 -> $f (mod_md will serve the cert from its store; backup: ${f}.bak_${ts})"
         fi
     done
 }
@@ -983,6 +1093,7 @@ main() {
     run_stage install_hook_adapter
     run_stage sudoers
     run_stage enable_config
+    run_stage check_dup_vhosts
     run_stage fix_ssl_vhosts
     run_stage ensure_ssl_vhost
     run_stage firewall

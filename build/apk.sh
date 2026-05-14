@@ -62,8 +62,8 @@ package() {
     for f in common.sh os.sh dns.sh firewall.sh hooks.sh discover.sh preflight.sh scan.sh; do
         install -m 0644 lib/\$f "\$pkgdir"/usr/lib/certberus/\$f
     done
-    for f in apache-md.sh apache-md-eab.sh nginx-certbot.sh tomcat-certbot.sh; do
-        install -m 0755 webservers/\$f "\$pkgdir"/usr/lib/certberus/webservers/\$f
+    for f in webservers/*.sh; do
+        install -m 0755 "\$f" "\$pkgdir"/usr/lib/certberus/webservers/\$(basename "\$f")
     done
 
     install -m 0644 config/config.env.example   "\$pkgdir"/usr/share/certberus/config/

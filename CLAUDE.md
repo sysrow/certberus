@@ -28,6 +28,16 @@ bash tests/run-all.sh --only firewall
 # Run integration tests (requires Docker daemon)
 bash tests/run-all.sh --integration
 
+# Useful runner flags: --no-docker (skip integration even if requested),
+# --keep-going (don't stop at first failure — collect all failures)
+
+# Local pre-push secret-scan (gitleaks + trufflehog + detect-secrets + trivy)
+bash scripts/secret-scan.sh
+
+# Install pre-commit hooks (shellcheck, gitleaks, detect-secrets, private-key/aws-cred checks)
+pre-commit install
+pre-commit run --all-files
+
 # Build single-file bundle
 ./build/bundle.sh              # produces dist/certberus
 
@@ -68,7 +78,7 @@ bash build/build.sh sync-version
 ## Key conventions
 
 - Guard against double-sourcing: each lib starts with `[[ -n "${_CB_<NAME>_LOADED:-}" ]] && return 0`
-- Config lives in `/etc/certberus/config.env` (CB_* variables). CLI flags override config via `cb_apply_cli_set`.
+- All public config/env variables use the `CB_*` prefix. Config lives in `/etc/certberus/config.env`; advanced tuning in `/etc/certberus/advanced.env`. CLI flags override config via `cb_apply_cli_set`, and any `CB_*` value can be set ad-hoc with `--set CB_NAME=value`.
 - All mutative commands (issue/renew/rollback/revoke) take an exclusive `flock` on `/var/lock/certberus.lock`.
 - Snapshots are atomic: tar to `.partial`, then `mv` to final name.
 - Version is tracked in two places: `build/VERSION` (source of truth for builds) and `CB_VERSION` in `bin/certberus` (synced by `build/build.sh sync-version`).

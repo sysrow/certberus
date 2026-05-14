@@ -34,9 +34,12 @@ for f in common.sh os.sh dns.sh firewall.sh hooks.sh discover.sh preflight.sh sc
     install -m 0644 "$SRC/lib/$f" "$PKGROOT/usr/lib/certberus/$f"
 done
 
-# Webservers
-for f in apache-md.sh apache-md-eab.sh nginx-certbot.sh tomcat-certbot.sh; do
-    install -m 0755 "$SRC/webservers/$f" "$PKGROOT/usr/lib/certberus/webservers/$f"
+# Webservers — install every .sh in webservers/. Hardcoded lists rot when a
+# new module is added (caddy.sh, certbot-only.sh, jetty-certbot.sh had been
+# silently dropped from the .deb, so `certberus install --webserver
+# certbot-only` failed with "Script not found").
+for src in "$SRC"/webservers/*.sh; do
+    install -m 0755 "$src" "$PKGROOT/usr/lib/certberus/webservers/$(basename "$src")"
 done
 
 # Config examples

@@ -166,6 +166,17 @@ stage_install_packages() {
     if (( ${#need[@]} > 0 )); then
         cb_log "Missing: ${need[*]}"
         cb_ask_yn "Install?" "Y/n" || cb_die "Aborting"
+        # Auto-heal missing /var/log/nginx. The Debian-family nginx postinst
+        # also touches log files without ensuring the parent exists; an
+        # earlier `rm -rf /var/log/nginx` (to free disk space, or via an
+        # over-eager cleanup) leaves the package unconfigurable.
+        if [[ "$CB_OS_ID" == debian || "$CB_OS_ID" == ubuntu ]] \
+                && [[ ! -d /var/log/nginx ]]; then
+            cb_warn "/var/log/nginx missing — creating before package install (Debian postinst would otherwise fail)"
+            mkdir -p /var/log/nginx
+            chown www-data:adm /var/log/nginx 2>/dev/null
+            chmod 750 /var/log/nginx 2>/dev/null
+        fi
         cb_pkg_install "${need[@]}" || cb_die "Installation failed"
     else
         cb_ok "All packages are present"
@@ -371,11 +382,67 @@ stage_nginx_acme_location() {
     local f
     for f in "$CB_NGINX_SITES_ENABLED"/* "$CB_NGINX_CONF_DIR"/conf.d/*.conf; do
         [[ -f "$f" ]] || continue
-        if grep 'certberus-acme\.conf' "$f" 2>/dev/null; then >/dev/null
+        if grep -q 'certberus-acme\.conf' "$f" 2>/dev/null; then
             cb_log "Removing obsolete include from $f"
             [[ "$CB_DRY_RUN" == "0" ]] && sed -i '/certberus-acme\.conf/d' "$f"
         fi
     done
+
+    # Positive injection: ensure that every server block owning our primary
+    # FQDN has an explicit `location ^~ /.well-known/acme-challenge/` serving
+    # from $CB_NGINX_WEBROOT. Without it, a `proxy_pass /`, `try_files =404`,
+    # `return 444` or any catch-all `location /` in the existing vhost will
+    # swallow the ACME probe and HTTP-01 fails with 502/404/444. Using `^~`
+    # forces nginx to match this prefix before any regex / catch-all.
+    local ts; ts=$(date +%Y%m%d-%H%M%S)
+    local touched=0
+    local primary="${VALID_DOMAINS[0]}"
+    local file_re="${primary//./\\.}"
+    local -A seen=()
+    local search_dirs=("$CB_NGINX_SITES_ENABLED" "$CB_NGINX_CONF_DIR/conf.d" "$CB_NGINX_SITES_AVAILABLE")
+    for sd in "${search_dirs[@]}"; do
+        [[ -d "$sd" ]] || continue
+        while IFS= read -r -d '' fp; do
+            [[ -n "${seen[$fp]:-}" ]] && continue
+            seen[$fp]=1
+            grep -qE "^[[:space:]]*server_name[[:space:]]+([^;]*[[:space:]])?${file_re}([[:space:]]|;)" "$fp" 2>/dev/null || continue
+            # Already has acme location?
+            grep -qE "well-known/acme-challenge" "$fp" 2>/dev/null && continue
+            cb_log "Injecting ACME challenge location into $fp (backup: ${fp}.bak_${ts})"
+            if [[ "$CB_DRY_RUN" == "0" ]]; then
+                cp "$fp" "$fp.bak_$ts"
+                awk -v primary="$primary" -v webroot="$CB_NGINX_WEBROOT" '
+                    BEGIN { in_server=0; injected=0 }
+                    /^[ \t]*server[ \t]*\{/ { in_server=1; print; next }
+                    in_server && !injected && /^[ \t]*server_name[ \t]/ {
+                        line=$0
+                        sub(/^[ \t]*server_name[ \t]+/, "", line)
+                        sub(/;.*$/, "", line)
+                        n=split(line, names, /[ \t]+/)
+                        for (i=1;i<=n;i++) {
+                            if (names[i]==primary) {
+                                print
+                                print "    # certberus: ACME HTTP-01 webroot (added by certberus)"
+                                print "    location ^~ /.well-known/acme-challenge/ {"
+                                print "        root " webroot ";"
+                                print "        try_files $uri =404;"
+                                print "    }"
+                                injected=1
+                                next
+                            }
+                        }
+                        print; next
+                    }
+                    { print }
+                ' "$fp" > "$fp.tmp" && mv "$fp.tmp" "$fp"
+            fi
+            touched=$((touched + 1))
+        done < <(find "$sd" -maxdepth 1 -type f \( -name '*.conf' -o -not -name '*.*' \) -print0 2>/dev/null)
+    done
+
+    if (( touched > 0 )); then
+        cb_ok "ACME challenge location injected into $touched vhost file(s)"
+    fi
     cb_ok "ACME webroot: $CB_NGINX_WEBROOT (nginx document root)"
 }
 
@@ -619,8 +686,6 @@ stage_issue_cert() {
 
 stage_inject_nginx_ssl() {
     cb_sep
-    # This is optional - the script can just issue the cert and leave nginx config to the admin.
-    # Below is a minimal addition of ssl_certificate directives if missing.
     local primary="${VALID_DOMAINS[0]}"
     local live_dir="/etc/letsencrypt/live/$primary"
     if [[ ! -d "$live_dir" && "$CB_DRY_RUN" == "0" ]]; then
@@ -628,7 +693,73 @@ stage_inject_nginx_ssl() {
         return 0
     fi
     cb_log "HTTPS configuration for nginx (paths: $live_dir)"
-    cb_log "Tip: for full configuration, edit sites-available/ manually - this script only issues the cert."
+
+    # Rewrite any hardcoded ssl_certificate / ssl_certificate_key directives
+    # in server blocks that own our FQDN. Without this the admin's pre-existing
+    # `ssl_certificate /etc/ssl/foo.crt` (e.g. an old self-signed) keeps being
+    # served and certberus's freshly-issued LE cert sits unused in
+    # /etc/letsencrypt/live/ — admin thinks certberus succeeded ("Done.") and
+    # only realises 90 days later when the browser warning persists.
+    #
+    # We comment each original line with a marker and emit a new directive
+    # right after, pointing at the certberus-managed live dir. Lines that
+    # already point to the live dir are left alone (idempotent re-run).
+    local ts; ts=$(date +%Y%m%d-%H%M%S)
+    local touched=0 file_re="${primary//./\\.}"
+    local -A seen=()
+    local search_dirs=("$CB_NGINX_SITES_ENABLED" "$CB_NGINX_CONF_DIR/conf.d" "$CB_NGINX_SITES_AVAILABLE")
+    for sd in "${search_dirs[@]}"; do
+        [[ -d "$sd" ]] || continue
+        while IFS= read -r -d '' f; do
+            [[ -n "${seen[$f]:-}" ]] && continue
+            seen[$f]=1
+            grep -qE "^[[:space:]]*server_name[[:space:]]+([^;]*[[:space:]])?${file_re}([[:space:]]|;)" "$f" 2>/dev/null || continue
+            grep -qE "^[[:space:]]*ssl_certificate(_key)?[[:space:]]" "$f" 2>/dev/null || continue
+            # Skip files where every ssl_certificate already points at live_dir.
+            if ! awk -v live="$live_dir" '
+                /^[[:space:]]*ssl_certificate(_key)?[[:space:]]/ {
+                    if (index($0, live "/") == 0) { mismatch=1; exit }
+                }
+                END { exit (mismatch ? 0 : 1) }
+            ' "$f"; then
+                continue
+            fi
+
+            cb_log "Rewriting ssl_certificate paths in $f -> $live_dir (backup: ${f}.bak_${ts})"
+            if [[ "$CB_DRY_RUN" == "0" ]]; then
+                cp "$f" "$f.bak_$ts"
+                awk -v live="$live_dir" '
+                    function _indent(s,    m) {
+                        m = ""
+                        if (match(s, /^[ \t]+/)) m = substr(s, 1, RLENGTH)
+                        return m
+                    }
+                    /^[ \t]*ssl_certificate[ \t]/ {
+                        if (index($0, live "/") > 0) { print; next }
+                        i = _indent($0); orig = $0; sub(/^[ \t]+/, "", orig)
+                        print i "# certberus: replaced (was): " orig
+                        print i "ssl_certificate " live "/fullchain.pem;"
+                        next
+                    }
+                    /^[ \t]*ssl_certificate_key[ \t]/ {
+                        if (index($0, live "/") > 0) { print; next }
+                        i = _indent($0); orig = $0; sub(/^[ \t]+/, "", orig)
+                        print i "# certberus: replaced (was): " orig
+                        print i "ssl_certificate_key " live "/privkey.pem;"
+                        next
+                    }
+                    { print }
+                ' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+            fi
+            touched=$((touched + 1))
+        done < <(find "$sd" -maxdepth 1 -type f \( -name '*.conf' -o -not -name '*.*' \) -print0 2>/dev/null)
+    done
+
+    if (( touched > 0 )); then
+        cb_ok "Rewrote ssl_certificate paths in $touched nginx vhost file(s)"
+    else
+        cb_log "No hardcoded ssl_certificate paths found; admin must add directives manually to sites-available/"
+    fi
     cb_log "Cert will be automatically reloaded on renewal via deploy hook."
 }
 

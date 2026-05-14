@@ -73,8 +73,8 @@ for f in common.sh os.sh dns.sh firewall.sh hooks.sh discover.sh preflight.sh sc
     install -m 0644 lib/\$f %{buildroot}%{_prefix}/lib/certberus/\$f
 done
 
-for f in apache-md.sh apache-md-eab.sh nginx-certbot.sh tomcat-certbot.sh; do
-    install -m 0755 webservers/\$f %{buildroot}%{_prefix}/lib/certberus/webservers/\$f
+for f in webservers/*.sh; do
+    install -m 0755 \$f %{buildroot}%{_prefix}/lib/certberus/webservers/\$(basename \$f)
 done
 
 install -m 0644 config/config.env.example   %{buildroot}%{_datadir}/certberus/config/

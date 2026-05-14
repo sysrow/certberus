@@ -38,7 +38,7 @@ sync_version() {
 }
 
 clean() {
-    say "Mazu $DIST_DIR"
+    say "Cleaning $DIST_DIR"
     rm -rf "$DIST_DIR"
     mkdir -p "$DIST_DIR"
     ok "clean"
@@ -65,7 +65,7 @@ build_tarball() {
     cp    "$REPO_ROOT/install.sh"  "$stage/"
     cp    "$REPO_ROOT/README.md"   "$stage/" 2>/dev/null || true
     cp    "$SCRIPT_DIR/VERSION"    "$stage/"
-    # Prava
+    # Permissions
     chmod 755 "$stage/install.sh" "$stage/bin/certberus"
     find "$stage/webservers" -name '*.sh' -exec chmod 755 {} \;
     find "$stage/lib" -name '*.sh' -exec chmod 644 {} \;

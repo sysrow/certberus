@@ -30,3 +30,4 @@ session-logs/
 .gitleaks.json
 .trufflehog.json
 .detect-secrets.json
+tests/e2e/results/

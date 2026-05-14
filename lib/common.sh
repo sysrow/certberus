@@ -583,14 +583,54 @@ cb_svc_is_active() {
     fi
 }
 cb_svc_start() {
-    local svc="$1"
+    local svc="$1" rc=0
     if _cb_has_systemd; then
-        systemctl start "$svc"
+        systemctl start "$svc"; rc=$?
     elif command -v service >/dev/null 2>&1; then
-        service "$svc" start
+        service "$svc" start; rc=$?
     elif [[ -x "/etc/init.d/$svc" ]]; then
-        "/etc/init.d/$svc" start
+        "/etc/init.d/$svc" start; rc=$?
     else
         return 1
+    fi
+    (( rc != 0 )) && cb_svc_diagnose_start_failure "$svc"
+    return $rc
+}
+
+# Print actionable diagnostics when a service refuses to start. We surface
+# three things the admin needs and almost never gets from "Apache start
+# failed": (1) the masked-unit case with the exact unmask command, (2) the
+# last 20 journal entries scoped to the unit, (3) the tail of the service's
+# own error log. Without this it is essentially impossible to figure out why
+# the service failed without SSHing to the box.
+cb_svc_diagnose_start_failure() {
+    local svc="$1"
+    _cb_has_systemd || return 0
+    local state
+    state=$(systemctl is-enabled "$svc" 2>&1 | tr -d '\r' | head -1)
+    if [[ "$state" == "masked" ]]; then
+        cb_error "Service '$svc' is MASKED — systemd refused to start it."
+        cb_error "  Someone previously ran: systemctl mask $svc"
+        cb_error "  Certberus will NOT auto-unmask (that decision is yours)."
+        cb_error "  To allow it, run:"
+        cb_error "    sudo systemctl unmask $svc"
+        cb_error "  Then re-run 'certberus install'."
+        return 0
+    fi
+    cb_error "Service '$svc' failed to start. Last 20 journal entries for $svc:"
+    if command -v journalctl >/dev/null 2>&1; then
+        journalctl -u "$svc" -n 20 --no-pager --no-hostname 2>/dev/null \
+            | sed 's/^/    /' \
+            | tee -a "$CB_LOG_FILE" >&2 || true
+    fi
+    local log
+    case "$svc" in
+        apache2|httpd) for log in /var/log/apache2/error.log /var/log/httpd/error_log; do [[ -f "$log" ]] && break; done ;;
+        nginx)         log=/var/log/nginx/error.log ;;
+        *)             log="" ;;
+    esac
+    if [[ -n "$log" && -f "$log" ]]; then
+        cb_error "Tail of $log (last 15 lines):"
+        tail -15 "$log" 2>/dev/null | sed 's/^/    /' | tee -a "$CB_LOG_FILE" >&2 || true
     fi
 }
