@@ -91,6 +91,14 @@ CB_EAB_REQUIRED="${CB_EAB_REQUIRED:-0}"
 APACHECTL=""
 VALID_DOMAINS=()
 
+# Reference point for "freshness": any certificate mod_md issues during this
+# run is written after this epoch. A cert file older than this predates the
+# run and must not be mistaken for a successful issuance.
+_CB_RUN_EPOCH=$(date +%s)
+# Resolved ACME directory URL for the configured CA. Set by
+# stage_generate_config so later stages can compare it against the MD store.
+_CB_RESOLVED_CA_URL=""
+
 # Per-process tempfile for passing VALID_DOMAINS between stage functions.
 # Uses mktemp -> cannot be hijacked by a pre-created symlink.
 CB_VALID_DOMAINS_FILE="$(mktemp -t certberus-domains.XXXXXX)" || cb_die "mktemp failed"
@@ -397,6 +405,84 @@ stage_cleanup_staging_data() {
     fi
 }
 
+# Extract the ACME directory URL a managed domain was last issued with,
+# straight from the mod_md store's md.json (.ca.url).
+_cb_md_json_ca_url() {
+    local f="$1"
+    [[ -f "$f" ]] || return 0
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '.ca.url // (.ca.urls[0]?) // empty' "$f" 2>/dev/null
+    else
+        # Fallback: the "ca" object is near the top of md.json, so the first
+        # "url" key is its directory URL.
+        grep -oE '"url"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" 2>/dev/null \
+            | head -1 | sed -E 's/.*"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/'
+    fi
+}
+
+# When the configured CA differs from the CA the MD store was issued with,
+# mod_md keeps serving the old (still-valid) certificate and never re-issues -
+# so switching CA appears to "work" but changes nothing. Detect that mismatch
+# and move the stale per-domain store aside (reversible) so mod_md issues a
+# fresh certificate from the configured CA on the next graceful.
+stage_reset_store_on_ca_change() {
+    cb_sep
+    local md_root="${CB_MOD_MD_APACHE_STORE_ROOT:-$_APACHE_MD_STORE}"
+    # The backup MUST live outside the mod_md store: mod_md scans every
+    # subdirectory of domains/ and aborts with AH10073 if one is not a
+    # well-formed MD, so a backup left inside domains/ takes Apache down.
+    local bak_root="${CB_BACKUP_DIR:-/var/backups/certberus}/md-store-stale-ca"
+    [[ -d "$md_root/domains" ]] || { cb_debug "No MD store yet"; return 0; }
+
+    # Self-heal: relocate any stale store dir an earlier run may have left
+    # inside domains/ (the bug above) out to the proper backup location.
+    local stray
+    for stray in "$md_root"/domains/*.certberus-bak-*; do
+        [[ -d "$stray" ]] || continue
+        [[ "$CB_DRY_RUN" == "0" ]] || { cb_log "  [DRY-RUN] would relocate $stray"; continue; }
+        mkdir -p "$bak_root"
+        mv "$stray" "$bak_root/$(basename "$stray")"
+        cb_warn "Relocated a store backup out of the mod_md store: $bak_root/$(basename "$stray")"
+    done
+
+    local want="$_CB_RESOLVED_CA_URL"
+    if [[ -z "$want" ]]; then
+        cb_debug "No resolved CA URL - skipping store CA-mismatch check"
+        return 0
+    fi
+    readarray -t VALID_DOMAINS < "$CB_VALID_DOMAINS_FILE"
+
+    local d mdjson have changed=0
+    for d in "${VALID_DOMAINS[@]}"; do
+        mdjson="$md_root/domains/$d/md.json"
+        [[ -f "$mdjson" ]] || continue
+        have="$(_cb_md_json_ca_url "$mdjson")"
+        [[ -z "$have" || "$have" == "$want" ]] && continue
+
+        cb_warn "MD store for '$d' was issued via a different CA than configured:"
+        cb_warn "    store:  $have"
+        cb_warn "    config: $want"
+        if [[ "$CB_DRY_RUN" == "0" ]]; then
+            local ts bak
+            ts="$(date +%Y%m%d_%H%M%S)"
+            mkdir -p "$bak_root"
+            bak="$bak_root/${d}-${ts}"
+            mv "$md_root/domains/$d" "$bak"
+            rm -rf "${md_root:?}/staging/$d" "${md_root:?}/tmp/$d" 2>/dev/null || true
+            cb_log "  Stale store moved aside: $bak"
+        else
+            cb_log "  [DRY-RUN] would move $md_root/domains/$d aside"
+        fi
+        changed=1
+    done
+
+    if (( changed )); then
+        cb_ok "Stale-CA store reset - mod_md will issue fresh certs from the configured CA"
+    else
+        cb_ok "MD store CA matches the configured CA"
+    fi
+}
+
 get_enabled_sites() {
     if (( _APACHE_HAS_A2EN )); then
         find "$CB_APACHE_ENABLED_DIR" -type l -exec readlink -f {} + 2>/dev/null | \
@@ -541,9 +627,15 @@ stage_generate_config() {
     if [[ -z "$ca_url" ]]; then
         case "$CB_CA" in
             letsencrypt)
+                # Always resolve an explicit URL - including Let's Encrypt
+                # production. Leaving MDCertificateAuthority unset makes mod_md
+                # fall back to whatever CA is already persisted in the MD store,
+                # so switching to Let's Encrypt would silently keep the old CA.
                 if [[ "$CB_STAGING" == "1" ]]; then
                     ca_url="$CB_ACME_URL_LETSENCRYPT_STAGING"
                     cb_warn "STAGING mode - issued certs are not trusted"
+                else
+                    ca_url="$CB_ACME_URL_LETSENCRYPT_PROD"
                 fi
                 ;;
             harica)
@@ -558,6 +650,9 @@ stage_generate_config() {
                 ;;
         esac
     fi
+    # Publish the resolved URL so later stages (store CA-mismatch check) can
+    # compare it against what the MD store was actually issued with.
+    _CB_RESOLVED_CA_URL="$ca_url"
 
     # EAB check
     if [[ "$CB_EAB_REQUIRED" == "1" ]]; then
@@ -963,6 +1058,31 @@ stage_test_reload() {
             fi
             cb_svc_restart "$_APACHE_SVC" || cb_die "Apache restart failed"
         fi
+
+        # A graceful reload (apachectl graceful / systemctl reload) only signals
+        # the parent process and returns 0 immediately. If the new generation
+        # fails to come up - e.g. mod_md aborts with AH10038 "Managed Domains
+        # overlap", which 'apache2ctl -t' does NOT catch - the parent then
+        # exits and the service ends up dead, while the reload call already
+        # reported success. Verify the service is actually still alive.
+        local _alive=0 _try
+        for _try in 1 2 3 4 5; do
+            if cb_svc_is_active "$_APACHE_SVC"; then _alive=1; break; fi
+            sleep 1
+        done
+        if (( ! _alive )); then
+            cb_error "Apache reload reported success but the service is not running."
+            cb_error "  A graceful reload returns 0 even when the new config fails at"
+            cb_error "  runtime (e.g. mod_md AH10038 'Managed Domains overlap')."
+            cb_svc_diagnose_start_failure "$_APACHE_SVC"
+            if [[ "${CB_AUTO_ROLLBACK:-0}" == "1" ]]; then
+                cb_snapshot_restore "$CB_LAST_SNAPSHOT"
+                cb_svc_restart "$_APACHE_SVC" || cb_die "Apache is unrecoverable even after rollback"
+                cb_die "Rollback done - Apache restored to its pre-install state"
+            fi
+            cb_rollback_hint
+            cb_die "Apache is down after reload - aborting"
+        fi
     fi
     cb_ok "Apache OK"
     cb_mark_installed "apache-md"
@@ -1002,6 +1122,18 @@ stage_test_reload() {
 # We poll for the staging cert so we can do a graceful AS SOON AS ACME arrives
 # (typically 5-30s). Default timeout 120s via CB_POST_ISSUE_TIMEOUT.
 # Can be disabled via CB_POST_ISSUE_WAIT=0.
+
+# True if the cert file was last written at/after this run started, i.e. it
+# was produced by mod_md during this install - not a leftover from a previous
+# run or a different CA. A bare "[[ -s file ]]" test cannot tell the two
+# apart and would report a stale certificate as a successful issuance.
+_cb_cert_is_fresh() {
+    local f="$1" mtime
+    [[ -s "$f" ]] || return 1
+    mtime="$(stat -c %Y "$f" 2>/dev/null || echo 0)"
+    (( mtime >= _CB_RUN_EPOCH - 5 ))
+}
+
 stage_post_issue_activate() {
     [[ "${CB_POST_ISSUE_WAIT:-1}" == "1" ]] || { cb_debug "post_issue_activate disabled"; return 0; }
     [[ "$CB_DRY_RUN" == "1" ]] && return 0
@@ -1017,13 +1149,32 @@ stage_post_issue_activate() {
 
     cb_log "Waiting for ACME issue (max ${timeout}s, watching staging/ and domains/)"
 
+    # A certificate already sitting in domains/ that was NOT written during
+    # this run predates the install. mod_md only re-issues it when renewal is
+    # actually due, so there is nothing to wait for here - report it honestly
+    # instead of claiming a fresh issuance. (A stale cert from a *different*
+    # CA has already been moved aside by stage_reset_store_on_ca_change.)
+    if [[ -s "$domains_cert" ]] && ! _cb_cert_is_fresh "$domains_cert"; then
+        local nb na
+        nb="$(openssl x509 -in "$domains_cert" -noout -startdate 2>/dev/null | cut -d= -f2)"
+        na="$(openssl x509 -in "$domains_cert" -noout -enddate   2>/dev/null | cut -d= -f2)"
+        if openssl x509 -in "$domains_cert" -noout -checkend 0 >/dev/null 2>&1; then
+            cb_ok "Existing valid certificate already in place for $primary"
+            cb_log "  valid: ${nb:-?} .. ${na:-?}"
+            cb_log "  It predates this run; mod_md renews it automatically when due."
+            return 0
+        fi
+        cb_warn "Certificate in domains/ for $primary is expired or not yet valid"
+        cb_warn "  (${nb:-?} .. ${na:-?}) - waiting for mod_md to re-issue"
+    fi
+
     # mod_md on some versions (Ubuntu 24.04, Apache 2.4.58) needs a second
     # graceful to even start the ACME job. We do it after a short wait.
     local initial_grace=0
     local waited=0 step=3
     while (( waited < timeout )); do
-        [[ -s "$domains_cert" ]] && { cb_ok "Cert in domains/ — done"; return 0; }
-        [[ -s "$staging_cert" ]] && break
+        _cb_cert_is_fresh "$domains_cert" && { cb_ok "Certificate issued and stored in domains/ for $primary — done"; return 0; }
+        _cb_cert_is_fresh "$staging_cert" && break
         if (( waited >= 10 && initial_grace == 0 )); then
             cb_debug "No cert yet — trying another graceful"
             "$APACHECTL" graceful >>"$CB_LOG_FILE" 2>&1 || true
@@ -1033,12 +1184,12 @@ stage_post_issue_activate() {
         waited=$(( waited + step ))
     done
 
-    if [[ -s "$domains_cert" ]]; then
-        cb_ok "Cert in domains/ — done"
+    if _cb_cert_is_fresh "$domains_cert"; then
+        cb_ok "Certificate issued and stored in domains/ for $primary — done"
         return 0
     fi
 
-    if [[ ! -s "$staging_cert" ]]; then
+    if ! _cb_cert_is_fresh "$staging_cert"; then
         cb_warn "ACME job did not complete in ${timeout}s. When the cert arrives in staging,"
         cb_warn "  run manually: $APACHECTL graceful"
         cb_warn "  (watch: tail -f $_APACHE_LOG_DIR/error.log | grep -i 'md\\[')"
@@ -1090,6 +1241,7 @@ main() {
     cb_run_hooks pre-issue
     run_stage enable_modules
     run_stage generate_config
+    run_stage reset_store_on_ca_change
     run_stage install_hook_adapter
     run_stage sudoers
     run_stage enable_config

@@ -93,6 +93,47 @@ else
     _pass "(skipped master/categorization tests - not root or /etc/apache2 in use)"
 fi
 
+echo "=== Test 1b: <MDomain> container form is detected and safely commented ==="
+# Regression: the conflict scanner used '^\s*MDomain' which silently missed
+# the container syntax '<MDomain ...>'. Two overlapping MDomain definitions
+# abort Apache with AH10038 - missing one here is a production outage.
+FAKE_BLK=$(mktemp -d)
+cat > "$FAKE_BLK/md-block.conf" <<EOF
+# leading comment
+<MDomain block.example.com>
+    MDCertificateAuthority https://acme.example.org/dir
+    MDContactEmail admin@example.com
+    MDMembers manual
+</MDomain>
+MDomain bare.example.com
+EOF
+if grep -rlqiE '^[[:space:]]*<?MDomain[s]?\b' "$FAKE_BLK"; then
+    _pass "scanner regex matches <MDomain> container form"
+else
+    _fail "scanner regex missed <MDomain> container form"
+fi
+_cb_comment_out_md "$FAKE_BLK/md-block.conf"
+if grep -qE '^[[:space:]]*<?MDomain' "$FAKE_BLK/md-block.conf" \
+   || grep -qE '^[[:space:]]*MD(CertificateAuthority|ContactEmail)' "$FAKE_BLK/md-block.conf"; then
+    echo "  Resulting file:"; sed 's/^/    /' "$FAKE_BLK/md-block.conf"
+    _fail "_cb_comment_out_md left a live MDomain directive"
+else
+    _pass "_cb_comment_out_md disabled the whole <MDomain> block and the bare directive"
+fi
+if grep -qE '^[[:space:]]*</MDomain>' "$FAKE_BLK/md-block.conf"; then
+    _fail "_cb_comment_out_md left a dangling </MDomain>"
+else
+    _pass "no dangling </MDomain> left behind"
+fi
+# idempotency: a second pass must not double-comment
+_cb_comment_out_md "$FAKE_BLK/md-block.conf"
+if grep -q '#CERTBERUS-DISABLED# #CERTBERUS-DISABLED#' "$FAKE_BLK/md-block.conf"; then
+    _fail "_cb_comment_out_md is not idempotent"
+else
+    _pass "_cb_comment_out_md is idempotent"
+fi
+rm -rf "$FAKE_BLK"
+
 echo "=== Test 2: cb_apache_fix_ssl_cert_paths ==="
 FAKE_B=$(mktemp -d)
 mkdir -p "$FAKE_B"/{sites-enabled,conf-enabled}

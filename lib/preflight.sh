@@ -77,7 +77,26 @@ cb_apache_md_sources() {
         esac
 
         printf '%s\t%s\t%s\n' "$cat" "$f" "$enabled"
-    done < <(grep -rlZiE '^\s*MDomain[s]?\b' "${roots[@]}" 2>/dev/null)
+    done < <(grep -rlZiE '^[[:space:]]*<?MDomain[s]?\b' "${roots[@]}" 2>/dev/null)
+    # NOTE: the regex must also match the container form '<MDomain ...>', not
+    # only the bare 'MDomain ...' directive. mod_md treats both identically and
+    # two overlapping definitions abort Apache with AH10038. Missing the block
+    # form here silently leaves a conflicting config enabled.
+}
+
+# Comment out every MDomain-related directive in a file: both the bare
+# top-level directives and whole '<MDomain ...> ... </MDomain>' container
+# blocks. Commenting only the opening tag of a container would leave a
+# dangling '</MDomain>' and break the config, so the entire block is
+# commented. Idempotent: lines already carrying the marker are skipped.
+_cb_comment_out_md() {
+    local f="$1"
+    [[ -f "$f" ]] || return 1
+    # 1) container blocks: <MDomain ...> ... </MDomain> (inclusive)
+    sed -i -E '/^[[:space:]]*<MDomain([[:space:]]|>)/,/^[[:space:]]*<\/MDomain>/ s/^([[:space:]]*)([^#[:space:]])/\1#CERTBERUS-DISABLED# \2/' "$f"
+    # 2) bare top-level MD* directives
+    sed -i -E 's/^([[:space:]]*)(MDomain[s]?|MDContactEmail|MDMessageCMD|MDCertificateAuthority|MDExternalAccountBinding)\b/\1#CERTBERUS-DISABLED# \2/' "$f"
+    return 0
 }
 
 # -------- Apache: deactivate MDomain in any location --------
@@ -115,28 +134,20 @@ cb_apache_disable_md_source() {
         conf-available|sites-available|mods-available)
             # This is not active (unless it also exists in enabled),
             # but on the next a2enconf/a2ensite it would be activated.
-            # Comment out MDomain lines.
+            # Comment out the MDomain directives / blocks.
             [[ "$CB_DRY_RUN" == "0" ]] && {
                 cp "$f" "$f.bak_$(date +%s)"
-                sed -i 's/^\(\s*MDomain\)/#CERTBERUS-DISABLED# \1/' "$f"
-                sed -i 's/^\(\s*MDContactEmail\)/#CERTBERUS-DISABLED# \1/' "$f"
-                sed -i 's/^\(\s*MDMessageCMD\)/#CERTBERUS-DISABLED# \1/' "$f"
-                sed -i 's/^\(\s*MDCertificateAuthority\)/#CERTBERUS-DISABLED# \1/' "$f"
-                sed -i 's/^\(\s*MDExternalAccountBinding\)/#CERTBERUS-DISABLED# \1/' "$f"
+                _cb_comment_out_md "$f"
             }
             cb_log "Commented out MDomain in: $f"
             return 0
             ;;
         master|conf.d|unknown)
             # apache2.conf or similar broken placements.
-            # Comment out MDomain lines (keep the rest).
+            # Comment out the MDomain directives / blocks (keep the rest).
             [[ "$CB_DRY_RUN" == "0" ]] && {
                 cp "$f" "$f.bak_$(date +%s)"
-                sed -i 's/^\(\s*MDomain\)/#CERTBERUS-DISABLED# \1/' "$f"
-                sed -i 's/^\(\s*MDContactEmail\)/#CERTBERUS-DISABLED# \1/' "$f"
-                sed -i 's/^\(\s*MDMessageCMD\)/#CERTBERUS-DISABLED# \1/' "$f"
-                sed -i 's/^\(\s*MDCertificateAuthority\)/#CERTBERUS-DISABLED# \1/' "$f"
-                sed -i 's/^\(\s*MDExternalAccountBinding\)/#CERTBERUS-DISABLED# \1/' "$f"
+                _cb_comment_out_md "$f"
             }
             cb_log "Commented out MDomain in: $f (master/unknown)"
             return 0
