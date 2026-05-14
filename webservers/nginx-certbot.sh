@@ -411,7 +411,41 @@ stage_nginx_acme_location() {
                 grep -qE "^[[:space:]]*server_name[[:space:]]+([^;]*[[:space:]])?${file_re}([[:space:]]|;)" "$fp" 2>/dev/null || continue
                 # Already has acme location?
                 if grep -qE "well-known/acme-challenge" "$fp" 2>/dev/null; then
+                    # An ACME location already exists. If it uses proxy_pass it
+                    # cannot serve certbot's locally-written challenge file —
+                    # replace it with a root-serving location.
+                    has_proxy=$(awk '
+                        /location[[:space:]].*well-known\/acme-challenge/ { in_loc=1; next }
+                        in_loc && /proxy_pass/ { print "yes"; exit }
+                        in_loc && /^[[:space:]]*\}/ { exit }
+                    ' "$fp" 2>/dev/null)
+                    if [[ -z "$has_proxy" ]]; then
+                        injected_files[$rp]=1
+                        continue
+                    fi
+                    cb_warn "ACME location in $fp delegates via proxy_pass; replacing with local webroot serving (backup: ${fp}.bak_${ts})"
+                    if [[ "$CB_DRY_RUN" == "0" ]]; then
+                        cp "$fp" "$fp.bak_$ts"
+                        awk -v webroot="$CB_NGINX_WEBROOT" '
+                            BEGIN { in_acme=0 }
+                            !in_acme && /location[[:space:]].*well-known\/acme-challenge/ {
+                                print "    location ^~ /.well-known/acme-challenge/ {"
+                                in_acme=1
+                                next
+                            }
+                            in_acme && /^[[:space:]]*\}/ {
+                                print "        root " webroot ";"
+                                print "        try_files $uri =404;"
+                                print "    }"
+                                in_acme=0
+                                next
+                            }
+                            in_acme { next }
+                            { print }
+                        ' "$fp" > "$fp.tmp" && mv "$fp.tmp" "$fp"
+                    fi
                     injected_files[$rp]=1
+                    touched=$((touched + 1))
                     continue
                 fi
                 cb_log "Injecting ACME challenge location into $fp (backup: ${fp}.bak_${ts})"
