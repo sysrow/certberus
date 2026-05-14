@@ -396,48 +396,56 @@ stage_nginx_acme_location() {
     # forces nginx to match this prefix before any regex / catch-all.
     local ts; ts=$(date +%Y%m%d-%H%M%S)
     local touched=0
-    local primary="${VALID_DOMAINS[0]}"
-    local file_re="${primary//./\\.}"
-    local -A seen=()
+    # Keyed by resolved (canonical) path so that symlinks sites-enabled -> sites-available
+    # don't cause the same physical file to be processed twice across the domain loop.
+    local -A injected_files=()
     local search_dirs=("$CB_NGINX_SITES_ENABLED" "$CB_NGINX_CONF_DIR/conf.d" "$CB_NGINX_SITES_AVAILABLE")
-    for sd in "${search_dirs[@]}"; do
-        [[ -d "$sd" ]] || continue
-        while IFS= read -r -d '' fp; do
-            [[ -n "${seen[$fp]:-}" ]] && continue
-            seen[$fp]=1
-            grep -qE "^[[:space:]]*server_name[[:space:]]+([^;]*[[:space:]])?${file_re}([[:space:]]|;)" "$fp" 2>/dev/null || continue
-            # Already has acme location?
-            grep -qE "well-known/acme-challenge" "$fp" 2>/dev/null && continue
-            cb_log "Injecting ACME challenge location into $fp (backup: ${fp}.bak_${ts})"
-            if [[ "$CB_DRY_RUN" == "0" ]]; then
-                cp "$fp" "$fp.bak_$ts"
-                awk -v primary="$primary" -v webroot="$CB_NGINX_WEBROOT" '
-                    BEGIN { in_server=0; injected=0 }
-                    /^[ \t]*server[ \t]*\{/ { in_server=1; print; next }
-                    in_server && !injected && /^[ \t]*server_name[ \t]/ {
-                        line=$0
-                        sub(/^[ \t]*server_name[ \t]+/, "", line)
-                        sub(/;.*$/, "", line)
-                        n=split(line, names, /[ \t]+/)
-                        for (i=1;i<=n;i++) {
-                            if (names[i]==primary) {
-                                print
-                                print "    # certberus: ACME HTTP-01 webroot (added by certberus)"
-                                print "    location ^~ /.well-known/acme-challenge/ {"
-                                print "        root " webroot ";"
-                                print "        try_files $uri =404;"
-                                print "    }"
-                                injected=1
-                                next
+    local domain file_re sd fp rp
+    for domain in "${VALID_DOMAINS[@]}"; do
+        file_re="${domain//./\\.}"
+        for sd in "${search_dirs[@]}"; do
+            [[ -d "$sd" ]] || continue
+            while IFS= read -r -d '' fp; do
+                rp=$(readlink -f "$fp" 2>/dev/null || printf '%s' "$fp")
+                [[ -n "${injected_files[$rp]:-}" ]] && continue
+                grep -qE "^[[:space:]]*server_name[[:space:]]+([^;]*[[:space:]])?${file_re}([[:space:]]|;)" "$fp" 2>/dev/null || continue
+                # Already has acme location?
+                if grep -qE "well-known/acme-challenge" "$fp" 2>/dev/null; then
+                    injected_files[$rp]=1
+                    continue
+                fi
+                cb_log "Injecting ACME challenge location into $fp (backup: ${fp}.bak_${ts})"
+                if [[ "$CB_DRY_RUN" == "0" ]]; then
+                    cp "$fp" "$fp.bak_$ts"
+                    awk -v primary="$domain" -v webroot="$CB_NGINX_WEBROOT" '
+                        BEGIN { in_server=0; injected=0 }
+                        /^[ \t]*server[ \t]*\{/ { in_server=1; print; next }
+                        in_server && !injected && /^[ \t]*server_name[ \t]/ {
+                            line=$0
+                            sub(/^[ \t]*server_name[ \t]+/, "", line)
+                            sub(/;.*$/, "", line)
+                            n=split(line, names, /[ \t]+/)
+                            for (i=1;i<=n;i++) {
+                                if (names[i]==primary) {
+                                    print
+                                    print "    # certberus: ACME HTTP-01 webroot (added by certberus)"
+                                    print "    location ^~ /.well-known/acme-challenge/ {"
+                                    print "        root " webroot ";"
+                                    print "        try_files $uri =404;"
+                                    print "    }"
+                                    injected=1
+                                    next
+                                }
                             }
+                            print; next
                         }
-                        print; next
-                    }
-                    { print }
-                ' "$fp" > "$fp.tmp" && mv "$fp.tmp" "$fp"
-            fi
-            touched=$((touched + 1))
-        done < <(find "$sd" -maxdepth 1 -type f \( -name '*.conf' -o -not -name '*.*' \) -print0 2>/dev/null)
+                        { print }
+                    ' "$fp" > "$fp.tmp" && mv "$fp.tmp" "$fp"
+                fi
+                injected_files[$rp]=1
+                touched=$((touched + 1))
+            done < <(find "$sd" -maxdepth 1 -type f \( -name '*.conf' -o -not -name '*.*' \) -print0 2>/dev/null)
+        done
     done
 
     if (( touched > 0 )); then
