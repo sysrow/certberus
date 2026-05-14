@@ -10,7 +10,7 @@
 #
 set -uo pipefail
 
-CB_VERSION="0.2.9"
+CB_VERSION="0.2.10"
 
 # Locate libraries - dev mode (repo) or installed mode
 _SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -534,16 +534,27 @@ cmd_revoke() {
 # -------- Commands --------
 cmd_install() {
     cb_banner "Certberus — interactive setup"
+    # interactive always asks — CB_ASSUME_YES from config.env must not suppress prompts
+    [[ -z "$CB_YES_CLI" ]] && CB_ASSUME_YES=0
     local ws="$CB_WEBSERVER_CLI"
-    # Honor CB_WEBSERVER from config.env when --webserver was not given, the
-    # same way cmd_issue/cmd_auto do. Without this, an explicit
-    # CB_WEBSERVER=apache in config.env was silently ignored and 'install'
-    # auto-detected instead - which can target the wrong webserver entirely.
-    [[ -z "$ws" || "$ws" == "auto" ]] && ws="${CB_WEBSERVER:-auto}"
-    if [[ -z "$ws" || "$ws" == "auto" ]]; then
-        local detected; detected=$(cb_detect_webserver)
-        cb_log "Detected webserver(s): ${detected:-none}"
-        if cb_has_tty && [[ "$CB_ASSUME_YES" != "1" ]]; then
+
+    if cb_has_tty; then
+        # Always show webserver menu. If --webserver was given on CLI, honor it
+        # and skip. If CB_WEBSERVER is set in config, use it as the default
+        # selection but still show the menu so the user can change it.
+        if [[ -z "$ws" ]]; then
+            local detected; detected=$(cb_detect_webserver)
+            cb_log "Detected webserver(s): ${detected:-none}"
+            local _ws_cfg="${CB_WEBSERVER:-auto}"
+            local _ws_def=1
+            case "$_ws_cfg" in
+                apache)       _ws_def=1 ;;
+                nginx)        _ws_def=2 ;;
+                tomcat)       _ws_def=3 ;;
+                jetty)        _ws_def=4 ;;
+                caddy)        _ws_def=5 ;;
+                certbot-only) _ws_def=6 ;;
+            esac
             echo
             echo "Which webserver do you want to set up?"
             echo "  1) Apache  (mod_md — native ACME)"
@@ -554,8 +565,8 @@ cmd_install() {
             echo "  6) certbot-only  (HAProxy, Postfix, ...)"
             echo "  7) Exit"
             local choice
-            read -r -p "Choice [1]: " choice </dev/tty
-            choice="${choice:-1}"
+            read -r -p "Choice [$_ws_def]: " choice </dev/tty
+            choice="${choice:-$_ws_def}"
             case "$choice" in
                 1) ws="apache" ;;
                 2) ws="nginx" ;;
@@ -565,34 +576,27 @@ cmd_install() {
                 6) ws="certbot-only" ;;
                 *) exit 0 ;;
             esac
-        else
-            case "$detected" in
-                *apache*) ws="apache" ;;
-                *nginx*)  ws="nginx" ;;
-                *tomcat*) ws="tomcat" ;;
-                *jetty*)  ws="jetty" ;;
-                *caddy*)  ws="caddy" ;;
-                *) cb_die "No active webserver detected. Specify --webserver." ;;
-            esac
-            cb_log "Selected: $ws"
         fi
-    fi
 
-    # CA selection (if not already specified via --ca)
-    if [[ -z "$CB_CA_CLI" ]] && cb_has_tty && [[ "$CB_ASSUME_YES" != "1" ]]; then
-        echo
-        echo "Certificate Authority:"
-        echo "  1) Let's Encrypt      (free, standard choice)"
-        echo "  2) HARICA / CESNET TCS (requires EAB account from cm.harica.gr)"
-        echo "  3) ZeroSSL             (requires EAB account from zerossl.com)"
-        local ca_choice
-        read -r -p "Choice [1]: " ca_choice </dev/tty
-        case "${ca_choice:-1}" in
-            1) CB_CA_CLI="letsencrypt" ;;
-            2) CB_CA_CLI="harica" ;;
-            3) CB_CA_CLI="zerossl" ;;
-            *) CB_CA_CLI="letsencrypt" ;;
-        esac
+        # Always show CA menu. Default from config or CLI.
+        if [[ -z "$CB_CA_CLI" ]]; then
+            local _ca_cfg="${CB_CA:-letsencrypt}"
+            local _ca_def=1
+            case "$_ca_cfg" in harica) _ca_def=2 ;; zerossl) _ca_def=3 ;; esac
+            echo
+            echo "Certificate Authority:"
+            echo "  1) Let's Encrypt      (free, standard choice)"
+            echo "  2) HARICA / CESNET TCS (requires EAB account from cm.harica.gr)"
+            echo "  3) ZeroSSL             (requires EAB account from zerossl.com)"
+            local ca_choice
+            read -r -p "Choice [$_ca_def]: " ca_choice </dev/tty
+            case "${ca_choice:-$_ca_def}" in
+                1) CB_CA_CLI="letsencrypt" ;;
+                2) CB_CA_CLI="harica" ;;
+                3) CB_CA_CLI="zerossl" ;;
+                *) CB_CA_CLI="letsencrypt" ;;
+            esac
+        fi
 
         if [[ "$CB_CA_CLI" == "harica" || "$CB_CA_CLI" == "zerossl" ]]; then
             echo
@@ -610,6 +614,23 @@ cmd_install() {
                 [[ -z "$CLI_ACME_URL" ]] && cb_die "ACME URL is required for HARICA"
             fi
         fi
+    else
+        # Non-interactive fallback: use config / CLI values as-is
+        [[ -z "$ws" || "$ws" == "auto" ]] && ws="${CB_WEBSERVER:-auto}"
+        if [[ "$ws" == "auto" ]]; then
+            local detected; detected=$(cb_detect_webserver)
+            cb_log "Detected webserver(s): ${detected:-none}"
+            case "$detected" in
+                *apache*) ws="apache" ;;
+                *nginx*)  ws="nginx" ;;
+                *tomcat*) ws="tomcat" ;;
+                *jetty*)  ws="jetty" ;;
+                *caddy*)  ws="caddy" ;;
+                *) cb_die "No active webserver detected. Specify --webserver." ;;
+            esac
+        fi
+        cb_log "Selected: $ws"
+        [[ -z "$CB_CA_CLI" ]] && CB_CA_CLI="${CB_CA:-letsencrypt}"
     fi
 
     # Offer to save config.env (only as root, otherwise no point asking)
