@@ -10,11 +10,25 @@
 #
 set -uo pipefail
 
-CB_VERSION="0.2.10"
+CB_VERSION="0.2.11"
 
-# Locate libraries - dev mode (repo) or installed mode
+# Locate libraries.
+# Priority:
+#   1) pre-set CB_LIB_DIR (test harnesses, custom installs)
+#   2) dev mode (script lives in repo: $repo/bin/certberus, libs at $repo/lib)
+#   3) installed mode at /usr/local/lib/certberus
+#   4) installed mode at /opt/certberus/lib
 _SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
-if [[ -f "$_SELF_DIR/../lib/common.sh" ]]; then
+if [[ -n "${CB_LIB_DIR:-}" && -f "$CB_LIB_DIR/common.sh" ]]; then
+    : # honor caller-supplied CB_LIB_DIR
+    if [[ -z "${CB_WEBSERVERS_DIR:-}" ]]; then
+        if [[ -d "$CB_LIB_DIR/../webservers" ]]; then
+            CB_WEBSERVERS_DIR="$(cd "$CB_LIB_DIR/../webservers" && pwd)"
+        elif [[ -d "$CB_LIB_DIR/webservers" ]]; then
+            CB_WEBSERVERS_DIR="$CB_LIB_DIR/webservers"
+        fi
+    fi
+elif [[ -f "$_SELF_DIR/../lib/common.sh" ]]; then
     # Dev mode (run directly from repo: bin/certberus)
     CB_LIB_DIR="$(cd "$_SELF_DIR/../lib" && pwd)"
     CB_WEBSERVERS_DIR="$(cd "$_SELF_DIR/../webservers" && pwd)"
@@ -28,7 +42,7 @@ else
     echo "[ERR] Cannot find certberus libraries. Run install.sh." >&2
     exit 2
 fi
-export CB_LIB_DIR
+export CB_LIB_DIR CB_WEBSERVERS_DIR
 
 # shellcheck disable=SC1091
 source "$CB_LIB_DIR/common.sh"
@@ -112,6 +126,8 @@ Usage: certberus [GLOBAL] COMMAND [ARGS]
   --webroot DIR    --port80 STRAT (tomcat: iptables|webroot|proxy)
   --firewall       certberus opens tcp/80+443 for the ACME challenge
   --no-firewall    leave the firewall alone; proceed even if tcp/80 looks closed
+                   (with --ca harica this is implicit - a closed local tcp/80
+                    is only a warning, the upstream firewall is assumed to allow it)
   --skip-dns-check
   --set CB_X=Y     (repeatable, advanced override)
   -t/--staging   -y/--yes   -n/--dry-run   -v/--verbose
@@ -772,6 +788,13 @@ cmd_issue_webserver() {
     # firewall ruleset directly (no domain needed, no flaky self-probe) so this
     # also fires when domains are auto-detected and CB_DOMAINS is empty.
     # certberus does NOT touch the firewall unless --firewall was given.
+    #
+    # HARICA exception: with HARICA/CESNET TCS the local host firewall view is
+    # usually incomplete (managed upstream firewall, NAT, organizational
+    # routing). The whole point of HARICA EAB is org-level pre-validation, so
+    # certberus must not abort just because the local nft/ufw view says
+    # "closed". A warning is enough; the admin can still react if validation
+    # times out.
     if [[ "${CB_FIREWALL_AUTO_OPEN:-0}" != "1" && "${CB_SKIP_PORT80_CHECK:-0}" != "1" ]]; then
         cb_log "Scanning firewall for inbound tcp/80 ($(cb_firewall_backend_pretty))..."
         case "$(cb_firewall_port_open_to_world tcp 80)" in
@@ -783,36 +806,44 @@ cmd_issue_webserver() {
                 cb_warn "  If ACME validation times out, open tcp/80 for the CA or re-run with --firewall."
                 ;;
             closed)
-                cb_error "######################################################################"
-                cb_error "  THIS WILL NOT WORK: the firewall is CLOSED for inbound tcp/80."
-                cb_error ""
-                cb_error "  ACME HTTP-01 needs the CA to fetch"
-                cb_error "      http://<your-domain>/.well-known/acme-challenge/<token>"
-                cb_error "  and the host firewall ($(cb_firewall_backend_pretty)) blocks tcp/80."
-                cb_error ""
-                cb_error "  certberus does NOT change the firewall unless you ask it to. Options:"
-                cb_error "    A) let certberus open tcp/80 (+443) for the issuance:"
-                cb_error "         certberus setup --firewall"
-                cb_error "    B) open tcp/80 yourself in the existing policy, then re-run"
-                cb_error "    C) proceed without touching the firewall (ACME keeps failing"
-                cb_error "       until tcp/80 is reachable - mod_md will retry):"
-                cb_error "         certberus setup --no-firewall"
-                cb_error "######################################################################"
-                # How to resolve the closed-firewall situation:
-                #   --no-firewall      -> explicit opt-out, proceed non-interactively
-                #   interactive TTY    -> ask the admin
-                #   otherwise          -> fail fast (automation must pick a flag)
-                if [[ "${CB_FIREWALL_OPT_OUT:-0}" == "1" ]]; then
-                    cb_warn "Proceeding without touching the firewall (--no-firewall)."
-                    cb_warn "  ACME HTTP-01 will keep failing until tcp/80 is reachable."
-                elif cb_has_tty && [[ "${CB_ASSUME_YES:-0}" != "1" ]]; then
-                    if cb_ask_yn "Continue anyway without opening the firewall?" "y/N"; then
-                        cb_warn "Continuing - mod_md will keep retrying until tcp/80 is reachable."
-                    else
-                        cb_die "Aborted - open tcp/80 first, or re-run with --firewall."
-                    fi
+                if [[ "$ca" == "harica" ]]; then
+                    cb_warn "Firewall: local host firewall looks closed for tcp/80 ($(cb_firewall_backend_pretty))."
+                    cb_warn "  CA=harica: proceeding anyway - HARICA setups typically rely on an"
+                    cb_warn "  upstream firewall/NAT that the local view cannot see. If ACME"
+                    cb_warn "  validation later times out, open tcp/80 in the policy that actually"
+                    cb_warn "  fronts this host."
                 else
-                    cb_die "Inbound tcp/80 is firewalled. Re-run with --firewall (certberus opens it) or --no-firewall (proceed without)."
+                    cb_error "######################################################################"
+                    cb_error "  THIS WILL NOT WORK: the firewall is CLOSED for inbound tcp/80."
+                    cb_error ""
+                    cb_error "  ACME HTTP-01 needs the CA to fetch"
+                    cb_error "      http://<your-domain>/.well-known/acme-challenge/<token>"
+                    cb_error "  and the host firewall ($(cb_firewall_backend_pretty)) blocks tcp/80."
+                    cb_error ""
+                    cb_error "  certberus does NOT change the firewall unless you ask it to. Options:"
+                    cb_error "    A) let certberus open tcp/80 (+443) for the issuance:"
+                    cb_error "         certberus setup --firewall"
+                    cb_error "    B) open tcp/80 yourself in the existing policy, then re-run"
+                    cb_error "    C) proceed without touching the firewall (ACME keeps failing"
+                    cb_error "       until tcp/80 is reachable - mod_md will retry):"
+                    cb_error "         certberus setup --no-firewall"
+                    cb_error "######################################################################"
+                    # How to resolve the closed-firewall situation:
+                    #   --no-firewall      -> explicit opt-out, proceed non-interactively
+                    #   interactive TTY    -> ask the admin
+                    #   otherwise          -> fail fast (automation must pick a flag)
+                    if [[ "${CB_FIREWALL_OPT_OUT:-0}" == "1" ]]; then
+                        cb_warn "Proceeding without touching the firewall (--no-firewall)."
+                        cb_warn "  ACME HTTP-01 will keep failing until tcp/80 is reachable."
+                    elif cb_has_tty && [[ "${CB_ASSUME_YES:-0}" != "1" ]]; then
+                        if cb_ask_yn "Continue anyway without opening the firewall?" "y/N"; then
+                            cb_warn "Continuing - mod_md will keep retrying until tcp/80 is reachable."
+                        else
+                            cb_die "Aborted - open tcp/80 first, or re-run with --firewall."
+                        fi
+                    else
+                        cb_die "Inbound tcp/80 is firewalled. Re-run with --firewall (certberus opens it) or --no-firewall (proceed without)."
+                    fi
                 fi
                 ;;
         esac

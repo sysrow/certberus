@@ -26,7 +26,26 @@ reset_mocks() {
     # Reset detection state from previous source
     unset _CB_FW_LOADED 2>/dev/null || true
     export CB_DRY_RUN=0
-    export PATH="$MOCK:$ORIG_PATH"
+    # Strip sbin paths so real /usr/sbin/{nft,iptables,ufw,firewall-cmd}
+    # cannot leak in when the test wants the tool to be absent. /usr/bin and
+    # /bin stay so basic shell utilities (cat, rm, mkdir, ...) still work.
+    local clean_path=""
+    local d
+    while IFS= read -r d; do
+        case "$d" in
+            */sbin|/sbin|/usr/sbin|/usr/local/sbin) continue ;;
+            "") continue ;;
+        esac
+        clean_path="${clean_path:+$clean_path:}$d"
+    done < <(echo "$ORIG_PATH" | tr ':' '\n')
+    export PATH="$MOCK:$clean_path"
+    # Default-deny systemctl - any test that wants a service to look 'active'
+    # provides its own systemctl mock and overwrites this file.
+    cat > "$MOCK/systemctl" <<'MOCKEOF'
+#!/bin/bash
+exit 1
+MOCKEOF
+    chmod +x "$MOCK/systemctl"
 }
 
 # Helper: mock command with logging and optional output/return value

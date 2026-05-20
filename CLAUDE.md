@@ -66,7 +66,7 @@ bash build/build.sh sync-version
 **Webserver modules (`webservers/`):** Each is a standalone script spawned as a subprocess by the orchestrator. They receive forwarded CLI args via `build_forward_args()`.
 
 - `apache-md.sh` — Apache mod_md for Let's Encrypt (Debian/Ubuntu + RHEL/Fedora)
-- `apache-md-eab.sh` — Apache mod_md with EAB (HARICA/ZeroSSL)
+- `apache-md-eab.sh` — thin wrapper that sets `CB_CA=harica` + `CB_EAB_REQUIRED=1` and execs `apache-md.sh` (HARICA/CESNET TCS / ZeroSSL via EAB)
 - `nginx-certbot.sh` — nginx with certbot (webroot auto-detected from nginx config, all OS)
 - `tomcat-certbot.sh` — Tomcat 9+ with certbot (all OS)
 - `jetty-certbot.sh` — Jetty with certbot + PKCS12 keystore conversion (detects Shibboleth IdP as special case)
@@ -74,6 +74,12 @@ bash build/build.sh sync-version
 - `certbot-only.sh` — universal module (standalone or webroot, works on all OS including RHEL/Fedora)
 
 **Bundle (`build/bundle.sh`):** Produces a single self-extracting bash file (`dist/certberus`) that embeds all lib/*.sh and webservers/*.sh as heredoc payloads, extracts to a tmpdir at runtime, and cleans up on exit.
+
+**Installer (`install.sh`):** System install/uninstall script. Copies `bin/certberus` to `$PREFIX/sbin`, seeds `/etc/certberus/` from `config/examples/`, and creates `/var/log/certberus`, `/var/lib/certberus`, `/var/backups/certberus`. Use `--prefix` to override location or `--uninstall` to remove.
+
+**Config templates (`config/examples/`):** `config.env.example` (basic, copied to `/etc/certberus/config.env` on first run) and `advanced.env.example` (rarely-needed tunables, becomes `/etc/certberus/advanced.env`). Update these alongside any new `CB_*` variable.
+
+**Hook examples (`hooks/examples/`):** Reference run-parts hooks (pre-issue, post-renew, etc.) that get wired in via `lib/hooks.sh`. See `hooks/README.md` for the contract.
 
 ## Key conventions
 
@@ -85,7 +91,7 @@ bash build/build.sh sync-version
 
 ## Test conventions
 
-Tests live in `tests/` with three tiers: `unit/` (fast, pure bash), `chaos/` (destructive scenarios, may need `unshare`), `integration/` (Docker matrix). Exit code 77 = skip (not failure). Test helpers are in `tests/lib/assert.sh` and `tests/lib/env.sh`. Use `t_isolate_cb_dirs` to sandbox CB_* paths.
+Tests live in `tests/` with four tiers: `unit/` (fast, pure bash), `chaos/` (destructive scenarios, may need `unshare`), `integration/` (Docker matrix), and `e2e/` (end-to-end scenarios driven by `e2e-chaos.sh`). Exit code 77 = skip (not failure). Test helpers are in `tests/lib/assert.sh` and `tests/lib/env.sh`. Use `t_isolate_cb_dirs` to sandbox CB_* paths.
 
 ## Release process
 

@@ -31,9 +31,13 @@ assert_contains "$out" "--firewall" "help: --firewall (post-v0.1.5)"
 [[ $? -ne 0 ]] && t_pass "unknown command -> exit != 0" || t_fail "unknown command passed"
 
 # --- Library-load harness ---
-# Create a scrubbed copy that does not dispatch main, only provides functions
+# Create a scrubbed copy that does not dispatch main, only provides functions.
+# Pass CB_LIB_DIR / CB_WEBSERVERS_DIR pointing to the repo so the lib-locate
+# block in bin/certberus does not exit when the harness has no install on disk.
 LIB_FILE="$SANDBOX/cb_lib.sh"
 awk '/^# -------- Main dispatch --------$/ {exit} {print}' "$CB" > "$LIB_FILE"
+export CB_LIB_DIR="$CB_REPO_ROOT/lib"
+export CB_WEBSERVERS_DIR="$CB_REPO_ROOT/webservers"
 
 # Test 4: cmd_cert_info args - regression test
 cat > "$SANDBOX/probe-cert-info.sh" <<EOF
