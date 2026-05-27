@@ -5,13 +5,19 @@
 #
 # Strategy:
 #   1. certbot certonly (webroot / standalone) - no webserver configuration
-#   2. Post-issue hooks in /etc/certberus/hooks/post-issue.d/ handle deployment
-#      (e.g. conversion to PKCS12, copy to Jetty credentials, service reload)
-#   3. Certbot renewal timer takes care of automatic renewal
+#   2. Certbot renewal timer takes care of automatic renewal
+#
+# issue-only "only issues": by default it obtains the cert and stops. Deployment
+# (copy, conversion, reload) is the job of certbot's own deploy hooks in
+# /etc/letsencrypt/renewal-hooks/deploy/, which certbot runs on issuance and on
+# every renewal - no certberus involvement needed. Pass --hook "CMD" to register
+# one inline, or drop a script into that directory yourself.
+#
+# Opt-in: --enable-hooks brings back certberus' own hook system (pre/post-issue,
+# renewed.d, ...) plus a bridge deploy hook, for users who prefer it.
 #
 # Cert resides in /etc/letsencrypt/live/DOMAIN/ (standard certbot layout).
 # This module NEVER configures any webserver, touches the firewall, or reloads services.
-# Everything that should happen after obtaining a cert belongs in a hook.
 set -uo pipefail
 
 _SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -43,14 +49,27 @@ CB_EAB_KID="${CB_EAB_KID:-}"
 CB_EAB_HMAC="${CB_EAB_HMAC:-}"
 CB_ACME_URL="${CB_ACME_URL:-}"
 CB_EAB_REQUIRED="${CB_EAB_REQUIRED:-0}"
+# issue-only is "only issue" by default: certberus does NOT touch its own hook
+# dirs and does NOT install a certbot bridge hook. Opt in with --enable-hooks.
+CB_ENABLE_HOOKS="${CB_ENABLE_HOOKS:-0}"
+# Optional inline command passed straight to certbot as --deploy-hook (native;
+# runs on issuance and every renewal). Independent of CB_ENABLE_HOOKS.
+CB_CERTBOT_DEPLOY_HOOK="${CB_CERTBOT_DEPLOY_HOOK:-}"
 VALID_DOMAINS=()
+
+# Run a certberus hook event only when the user opted in with --enable-hooks.
+# Without it, issue-only stays pure: obtain the cert and nothing else.
+_cb_only_run_hooks() {
+    [[ "${CB_ENABLE_HOOKS:-0}" == "1" ]] || return 0
+    cb_run_hooks "$@"
+}
 
 usage() {
     cat <<USAGE
 certbot-only.sh - generic certbot (no webserver configuration)
 
 For services like Jetty, HAProxy, Postfix, Dovecot, custom app.
-Cert is obtained by certbot, deployment is handled by your hooks in post-issue.d/.
+issue-only obtains the cert and stops. Deployment is left to certbot.
 
 Usage: $0 [OPTIONS]
 
@@ -65,6 +84,11 @@ Usage: $0 [OPTIONS]
       --webroot DIR    ACME webroot (uses --webroot instead of --standalone)
       --eab-kid KID
       --eab-hmac HMAC
+      --hook "CMD"     Register CMD as certbot's native --deploy-hook. Runs on
+                       issuance and every renewal. Works on its own.
+      --enable-hooks   Bring back certberus' own hook system (pre/post-issue,
+                       renewed.d, ...) plus a bridge deploy hook. Separate from
+                       --hook; off by default.
       --set CB_X=Y     Advanced override of any CB_* option
   -h, --help
 
@@ -73,17 +97,18 @@ Certificate obtaining strategy:
   2. Without --webroot: certbot certonly --standalone (requires free port 80)
   3. With EAB (HARICA/ZeroSSL): --webroot is recommended
 
-After obtaining the cert, certberus runs hooks from post-issue.d/ (first issuance)
-and renewed.d/ (each renewal). A hook receives \$CA_CERT_PATH, \$CA_KEY_PATH and
-\$CA_PRIMARY_DOMAIN. Generic example - install the cert into a service and reload:
-  cat > /etc/certberus/hooks/renewed.d/10-deploy.sh <<'SH'
+Deployment (default): certbot runs every executable in
+/etc/letsencrypt/renewal-hooks/deploy/ after issuance and on each renewal, with
+\$RENEWED_LINEAGE and \$RENEWED_DOMAINS set. Install the cert into a service there:
+  cat > /etc/letsencrypt/renewal-hooks/deploy/10-myservice.sh <<'SH'
   #!/bin/bash
-  install -m 0644 "\$CA_CERT_PATH" /etc/myservice/fullchain.pem
-  install -m 0600 "\$CA_KEY_PATH"  /etc/myservice/privkey.pem
+  install -m 0644 "\$RENEWED_LINEAGE/fullchain.pem" /etc/myservice/fullchain.pem
+  install -m 0600 "\$RENEWED_LINEAGE/privkey.pem"   /etc/myservice/privkey.pem
   systemctl reload myservice
   SH
-  chmod +x /etc/certberus/hooks/renewed.d/10-deploy.sh
-  # put the same script in post-issue.d/ too to also run it on the first issuance
+  chmod +x /etc/letsencrypt/renewal-hooks/deploy/10-myservice.sh
+Or pass the same one-liner via --hook "...". With --enable-hooks, certberus'
+post-issue.d/ and renewed.d/ run instead (\$CA_CERT_PATH, \$CA_KEY_PATH, \$CA_PRIMARY_DOMAIN).
 USAGE
 }
 
@@ -102,6 +127,8 @@ parse_args() {
             --webroot) [[ $# -ge 2 ]] || cb_die "--webroot requires a value"; shift; CB_CERTBOT_ONLY_WEBROOT="$1" ;;
             --eab-kid) shift; CB_EAB_KID="$1" ;;
             --eab-hmac) shift; CB_EAB_HMAC="$1" ;;
+            --enable-hooks) CB_ENABLE_HOOKS=1 ;;
+            --hook) [[ $# -ge 2 ]] || cb_die "--hook requires a command"; shift; CB_CERTBOT_DEPLOY_HOOK="$1" ;;
             --no-firewall) cb_apply_cli_set "CB_FIREWALL_AUTO_OPEN=0" ;;
             --open-firewall)
                 cb_apply_cli_set "CB_FIREWALL_AUTO_OPEN=1"
@@ -120,7 +147,7 @@ stage_prepare() {
     cb_require_root
     cb_hook_context certbot-only ""
     mkdir -p "$CB_LOG_DIR" "$CB_STATE_DIR" "$CB_CERTBOT_HOOK_DIR" 2>/dev/null
-    cb_run_hooks pre-install
+    _cb_only_run_hooks pre-install
 }
 
 stage_install_packages() {
@@ -132,14 +159,14 @@ stage_install_packages() {
     else
         cb_ok "certbot is present"
     fi
-    cb_run_hooks post-install
+    _cb_only_run_hooks post-install
 }
 
 stage_snapshot() {
     cb_sep
-    cb_run_hooks pre-snapshot
+    _cb_only_run_hooks pre-snapshot
     cb_snapshot /etc/letsencrypt "certbot-only-pre-cert" >/dev/null || true
-    cb_run_hooks post-snapshot
+    _cb_only_run_hooks post-snapshot
 }
 
 stage_find_domains() {
@@ -176,6 +203,22 @@ stage_email() {
 stage_install_deploy_hook() {
     cb_sep
     local hook="$CB_CERTBOT_HOOK_DIR/certberus-certbot-only-hook.sh"
+
+    # Default (issue-only): do NOT install the bridge. Deployment is certbot's
+    # job via its native deploy hooks. Only install when the user opted in.
+    if [[ "${CB_ENABLE_HOOKS:-0}" != "1" ]]; then
+        cb_debug "certberus hooks disabled (issue-only default); not installing bridge deploy hook"
+        # Migration: a bridge from an older certberus version may still be on
+        # disk and would keep dispatching into certberus hooks on renewal.
+        if [[ -f "$hook" ]]; then
+            cb_warn "Bridge hook from an older certberus version is present: $hook"
+            cb_warn "  issue-only no longer manages certberus hooks by default. Either:"
+            cb_warn "    - pass --enable-hooks to keep using certberus hook dirs, or"
+            cb_warn "    - remove it to go fully native: rm '$hook'"
+        fi
+        return 0
+    fi
+
     cb_log "Installing certbot deploy hook: $hook"
     if [[ "$CB_DRY_RUN" == "0" ]]; then
         cat > "$hook" <<'HOOK_EOF'
@@ -235,7 +278,7 @@ stage_firewall() {
 
 stage_issue_cert() {
     cb_sep
-    cb_run_hooks pre-issue
+    _cb_only_run_hooks pre-issue
 
     # Certificate obtaining strategy
     local auth_mode=""
@@ -332,6 +375,9 @@ stage_issue_cert() {
     [[ -n "$acme_url" ]] && common_args+=(--server "$acme_url")
     [[ "$CB_EAB_REQUIRED" == "1" ]] && common_args+=(--eab-kid "$CB_EAB_KID" --eab-hmac-key "$CB_EAB_HMAC")
     [[ "$CB_DRY_RUN" == "1" ]] && common_args+=(--dry-run)
+    # Inline native deploy hook: certbot saves it into the renewal config, so it
+    # runs now and on every future renewal - no certberus machinery involved.
+    [[ -n "$CB_CERTBOT_DEPLOY_HOOK" ]] && common_args+=(--deploy-hook "$CB_CERTBOT_DEPLOY_HOOK")
 
     # Issue certificate
     local -a args=(certonly)
@@ -389,7 +435,7 @@ stage_issue_cert() {
                     "/etc/letsencrypt/live/$primary/privkey.pem" \
                     "$CB_CA" "certbot"
     export CA_SOURCE="certbot"
-    cb_run_hooks post-issue
+    _cb_only_run_hooks post-issue
 }
 
 stage_enable_timer() {
@@ -407,7 +453,7 @@ on_failure() {
     cb_error "Script failed (rc=$rc, stage=${CURRENT_STAGE:-?})"
     cb_rollback_hint
     export CA_PREV_EXIT="$rc" CA_PREV_STAGE="${CURRENT_STAGE:-?}"
-    cb_run_hooks on-failure 2>/dev/null || true
+    _cb_only_run_hooks on-failure 2>/dev/null || true
 }
 cb_on_exit_register on_failure
 cb_setup_traps
@@ -429,16 +475,28 @@ main() {
     cb_log "Cert: /etc/letsencrypt/live/${VALID_DOMAINS[0]}/"
     cb_log ""
     cb_log "Important: certbot-only does NOT deploy the cert to any service."
-    cb_log "Post-processing (copy, conversion, reload) is handled by your hooks:"
-    cb_log "  /etc/certberus/hooks/post-issue.d/   (on first issuance)"
-    cb_log "  /etc/certberus/hooks/renewed.d/       (on each renewal)"
-    cb_log ""
-    if [[ -z "$(find "$CB_HOOKS_DIR/post-issue.d" "$CB_HOOKS_DIR/renewed.d" -maxdepth 1 -type f -executable 2>/dev/null | head -1)" ]]; then
-        cb_warn "No hooks in post-issue.d/ or renewed.d/ - cert sits in /etc/letsencrypt/ without further action."
-        cb_log "  To deploy it, add an executable script to renewed.d/ (and post-issue.d/"
-        cb_log "  for the first run); it receives \$CA_CERT_PATH, \$CA_KEY_PATH, \$CA_PRIMARY_DOMAIN."
-        cb_log "    certberus hooks list   # list hook dirs and bundled examples"
-        cb_log "    # e.g. copy \$CA_CERT_PATH and \$CA_KEY_PATH into your service, then reload it"
+    if [[ "${CB_ENABLE_HOOKS:-0}" == "1" ]]; then
+        # Opt-in: certberus manages deployment via its own hook dirs + bridge.
+        cb_log "Deployment is handled by your certberus hooks (--enable-hooks):"
+        cb_log "  /etc/certberus/hooks/post-issue.d/   (on first issuance)"
+        cb_log "  /etc/certberus/hooks/renewed.d/       (on each renewal, via the bridge)"
+        if [[ -z "$(find "$CB_HOOKS_DIR/post-issue.d" "$CB_HOOKS_DIR/renewed.d" -maxdepth 1 -type f -executable 2>/dev/null | head -1)" ]]; then
+            cb_warn "No hooks in post-issue.d/ or renewed.d/ - cert sits in /etc/letsencrypt/ without further action."
+            cb_log "  Add an executable script to renewed.d/ (and post-issue.d/ for the first run);"
+            cb_log "  it receives \$CA_CERT_PATH, \$CA_KEY_PATH, \$CA_PRIMARY_DOMAIN."
+            cb_log "    certberus hooks list   # list hook dirs and bundled examples"
+        fi
+    else
+        # Default: certbot owns renewal and deployment.
+        cb_log "Deployment + renewal are certbot's job. Drop an executable script into:"
+        cb_log "  /etc/letsencrypt/renewal-hooks/deploy/   (certbot runs it on issue and every renewal)"
+        cb_log "  It receives \$RENEWED_LINEAGE and \$RENEWED_DOMAINS. Example:"
+        cb_log "    install -m640 \"\$RENEWED_LINEAGE/fullchain.pem\" /etc/myservice/ && systemctl reload myservice"
+        cb_log "  Or register one inline next time:  certberus ... --hook \"<command>\""
+        cb_log "  Prefer certberus-managed hooks instead?  re-run with --enable-hooks"
+        if [[ -n "$CB_CERTBOT_DEPLOY_HOOK" ]]; then
+            cb_ok "Registered certbot --deploy-hook: $CB_CERTBOT_DEPLOY_HOOK"
+        fi
     fi
     cb_mark_installed "certbot-only"
 }

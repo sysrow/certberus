@@ -10,7 +10,16 @@
 #
 set -uo pipefail
 
-CB_VERSION="0.2.12"
+# Require bash >= 4.4. Earlier bash (e.g. 4.3 on Debian 8) raises an
+# "unbound variable" error when expanding an empty array under `set -u`
+# (fixed upstream in bash 4.4), which makes certberus fail cryptically on
+# startup. Fail fast with a clear message instead.
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+    echo "certberus requires bash >= 4.4 (found ${BASH_VERSION})" >&2
+    exit 1
+fi
+
+CB_VERSION="0.3.0"
 
 # Locate libraries.
 # Priority:
@@ -131,6 +140,9 @@ Usage: certberus [GLOBAL] COMMAND [ARGS]
                    (with --ca harica this is implicit - a closed local tcp/80
                     is only a warning, the upstream firewall is assumed to allow it)
   --skip-dns-check
+  --hook "CMD"     issue-only: register CMD as certbot's native --deploy-hook
+                   (runs on issue and every renewal; works on its own)
+  --enable-hooks   issue-only: use certberus' own hook dirs + bridge instead
   --set CB_X=Y     (repeatable, advanced override)
   -t/--staging   -y/--yes   -n/--dry-run   -v/--verbose
 
@@ -178,6 +190,7 @@ cb_detect_webserver() {
 CB_CA_CLI=""; CB_WEBSERVER_CLI=""; CB_YES_CLI=""
 CLI_DOMAINS=""; CLI_EMAIL=""; CLI_EAB_KID=""; CLI_EAB_HMAC=""; CLI_ACME_URL=""
 CLI_WEBROOT=""; CLI_PORT80=""
+CLI_HOOK=""
 CLI_AUTO=0
 CLI_SET_ARGS=()
 
@@ -212,6 +225,18 @@ parse_global() {
             --skip-dns-check)
                 cb_apply_cli_set "CB_SKIP_DNS_CHECK=1"
                 CLI_SET_ARGS+=("CB_SKIP_DNS_CHECK=1")
+                ;;
+            --enable-hooks)
+                # issue-only only: opt back into certberus' own hook system.
+                cb_apply_cli_set "CB_ENABLE_HOOKS=1"
+                CLI_SET_ARGS+=("CB_ENABLE_HOOKS=1")
+                ;;
+            --hook)
+                # issue-only only: register CMD as certbot's native --deploy-hook.
+                # Forwarded verbatim (not via --set, which rejects spaces/metachars).
+                [[ $# -ge 2 ]] || cb_die "--hook requires a command"
+                shift
+                CLI_HOOK="$1"
                 ;;
             --set)
                 [[ $# -ge 2 ]] || cb_die "--set requires a value CB_NAME=value"
@@ -268,6 +293,12 @@ build_forward_args() {
         esac
     fi
     [[ -n "$CLI_PORT80" && "$target_ws" == "tomcat" ]] && out+=(--port80 "$CLI_PORT80")
+    if [[ -n "$CLI_HOOK" ]]; then
+        case "$target_ws" in
+            certbot-only|issue-only) out+=(--hook "$CLI_HOOK") ;;
+            *) cb_warn "--hook only applies to issue-only (certbot deploy hook); ignored for $target_ws." ;;
+        esac
+    fi
     local kv
     for kv in "${CLI_SET_ARGS[@]}"; do out+=(--set "$kv"); done
     # If the user explicitly passed --domain, use ONLY CLI domains

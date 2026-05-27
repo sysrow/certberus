@@ -128,4 +128,34 @@ bar=$(echo "$out" | tr ' ' '\n' | grep -cx 'bar.example.com' || true)
 assert_eq "1" "$foo" "foo.example.com exactly once (dedup)"
 assert_eq "1" "$bar" "bar.example.com exactly once (dedup)"
 
+# Test 7: --hook forwarded verbatim (with spaces/metachars) only for issue-only,
+# and --enable-hooks forwarded via --set. Guards the cb_apply_cli_set value
+# whitelist gotcha (a real deploy command has spaces and would be rejected by --set).
+cat > "$SANDBOX/probe-hook.sh" <<EOF
+#!/bin/bash
+set -u
+source "$LIB_FILE" 2>/dev/null
+cb_die(){ echo DIE; exit 99; }
+cb_warn(){ :; }
+CLI_DOMAINS=""
+CLI_SET_ARGS=("CB_ENABLE_HOOKS=1")
+CLI_HOOK="install -m640 x /etc/svc && systemctl reload svc"
+echo "WS=certbot-only"; build_forward_args certbot-only | tr '\n' '|'; echo
+echo "WS=issue-only";   build_forward_args issue-only   | tr '\n' '|'; echo
+echo "WS=apache";       build_forward_args apache       | tr '\n' '|'; echo
+EOF
+chmod +x "$SANDBOX/probe-hook.sh"
+out=$(bash "$SANDBOX/probe-hook.sh" 2>&1)
+hook_lines=$(echo "$out" | grep -c -- "--hook|install -m640 x /etc/svc && systemctl reload svc|" || true)
+assert_eq "2" "$hook_lines" \
+    "--hook forwarded verbatim (spaces/metachars) for both certbot-only and issue-only"
+assert_contains "$out" "--set|CB_ENABLE_HOOKS=1|" "--enable-hooks forwarded via --set"
+# apache line must NOT contain --hook
+apache_out=$(echo "$out" | sed -n 's/^WS=apache//p')
+if echo "$apache_out" | grep -q -- '--hook'; then
+    t_fail "--hook must not be forwarded to apache"
+else
+    t_pass "--hook not forwarded to apache (issue-only only)"
+fi
+
 t_summary
