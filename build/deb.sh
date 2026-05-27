@@ -137,8 +137,13 @@ fi
 chmod 0755 "$ETC" "$ETC/hooks" "$STATE" "$LOGDIR" "$BACKUPDIR"
 
 echo "certberus installed."
-echo "  Config:     $ETC/config.env"
-echo "  First run:  sudo certberus setup"
+echo "  Config:  $ETC/config.env"
+echo ""
+echo "  Quick start (non-interactive):"
+echo "    1. edit $ETC/config.env  (CB_EMAIL, CB_CA, EAB creds, CB_DOMAINS)"
+echo "    2. sudo certberus auto"
+echo ""
+echo "  Or run the interactive wizard:  sudo certberus setup"
 
 exit 0
 POSTINST

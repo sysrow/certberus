@@ -426,7 +426,7 @@ cb_persist_config_skeleton() {
         printf 'CB_DOMAINS="%s"\n' "$domains"
         printf 'CB_CA="%s"\n' "$ca"
         echo
-        printf '# CB_WEBSERVER=auto       # auto | apache | nginx | tomcat\n'
+        printf '# CB_WEBSERVER=auto       # auto | apache | nginx | tomcat | jetty | caddy | issue-only\n'
         printf '# CB_STAGING=0            # 1 = LE staging (testing)\n'
         printf '# CB_AUTO_ROLLBACK=1      # 1 = on failure, restore Apache config snapshot\n'
         echo
@@ -511,6 +511,42 @@ cb_retry() {
         fi
     done
     return "$rc"
+}
+
+# Render an argv for logging with the EAB HMAC value masked. The HMAC is a
+# long-lived account secret and must never land in stdout/log/syslog.
+# Usage: cb_log "certbot $(cb_redact_eab "${args[@]}")"
+cb_redact_eab() {
+    local out="" a mask=0
+    for a in "$@"; do
+        if (( mask )); then out+=" <redacted>"; mask=0; continue; fi
+        case "$a" in
+            --eab-hmac-key|--eab-hmac) out+=" $a"; mask=1 ;;
+            *) out+=" $a" ;;
+        esac
+    done
+    printf '%s' "${out# }"
+}
+
+# Parse `nginx -T` output (on stdin) and print the ACME webroot: the directory
+# of the 'root' that serves /.well-known/acme-challenge. Reverse proxies put
+# this 'root' inside a location block (often a one-liner), which a plain
+# server-level scan misses. Prints nothing if none is found. Stdin-only so it
+# is unit-testable without a running nginx.
+cb_nginx_acme_webroot() {
+    awk '
+        { line=$0; sub(/#.*/, "", line) }
+        tolower(line) ~ /acme-challenge/ { want=4 }
+        want>0 {
+            if (match(line, /root[ \t]+[^;]+;/)) {
+                r=substr(line, RSTART, RLENGTH)
+                sub(/^root[ \t]+/, "", r); sub(/[ \t]*;.*/, "", r)
+                gsub(/^[ \t]+|[ \t]+$/, "", r)
+                if (r ~ /^\//) { print r; exit }
+            }
+            want--
+        }
+    '
 }
 
 # -------- certbot wrapper with output verification --------

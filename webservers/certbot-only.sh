@@ -73,18 +73,17 @@ Certificate obtaining strategy:
   2. Without --webroot: certbot certonly --standalone (requires free port 80)
   3. With EAB (HARICA/ZeroSSL): --webroot is recommended
 
-After obtaining the cert, certberus runs hooks from /etc/certberus/hooks/post-issue.d/.
-Example (Jetty/Shibboleth):
-  cat > /etc/certberus/hooks/post-issue.d/10-copy-to-jetty.sh <<'SH'
+After obtaining the cert, certberus runs hooks from post-issue.d/ (first issuance)
+and renewed.d/ (each renewal). A hook receives \$CA_CERT_PATH, \$CA_KEY_PATH and
+\$CA_PRIMARY_DOMAIN. Generic example - install the cert into a service and reload:
+  cat > /etc/certberus/hooks/renewed.d/10-deploy.sh <<'SH'
   #!/bin/bash
-  openssl pkcs12 -export -passout pass: \\
-    -inkey /etc/letsencrypt/live/\$CA_PRIMARY_DOMAIN/privkey.pem \\
-    -in /etc/letsencrypt/live/\$CA_PRIMARY_DOMAIN/fullchain.pem \\
-    -out /opt/shibboleth-idp/credentials/idp-userfacing.p12
-  chown jetty /opt/shibboleth-idp/credentials/idp-userfacing.p12
-  chmod 600 /opt/shibboleth-idp/credentials/idp-userfacing.p12
+  install -m 0644 "\$CA_CERT_PATH" /etc/myservice/fullchain.pem
+  install -m 0600 "\$CA_KEY_PATH"  /etc/myservice/privkey.pem
+  systemctl reload myservice
   SH
-  chmod +x /etc/certberus/hooks/post-issue.d/10-copy-to-jetty.sh
+  chmod +x /etc/certberus/hooks/renewed.d/10-deploy.sh
+  # put the same script in post-issue.d/ too to also run it on the first issuance
 USAGE
 }
 
@@ -249,15 +248,22 @@ stage_issue_cert() {
         # have to specify it manually.
         local _detected_root=""
         if command -v nginx >/dev/null 2>&1; then
-            _detected_root=$(nginx -T 2>/dev/null | awk '
-                /^[[:space:]]*#/ { next }
-                /\{/ { depth++ }
-                /server[[:space:]]*\{/ { in_s=1; sd=depth; has80=0; r="" }
-                in_s && depth==sd && /listen[[:space:]]/ && /80/ { has80=1 }
-                in_s && depth==sd && /^[[:space:]]*root[[:space:]]/ { r=$2; gsub(/;/,"",r) }
-                /\}/ { if (in_s && depth==sd && has80 && r) { print r; exit }
-                       if (depth==sd) in_s=0; depth-- }
-            ' 2>/dev/null)
+            local _ngx; _ngx=$(nginx -T 2>/dev/null)
+            # Prefer the root that actually serves the ACME challenge (reverse
+            # proxies keep it in a location block, not at server level).
+            _detected_root=$(printf '%s\n' "$_ngx" | cb_nginx_acme_webroot)
+            # Fall back to a server-level root in a server that listens on :80.
+            if [[ -z "$_detected_root" ]]; then
+                _detected_root=$(printf '%s\n' "$_ngx" | awk '
+                    /^[[:space:]]*#/ { next }
+                    /\{/ { depth++ }
+                    /server[[:space:]]*\{/ { in_s=1; sd=depth; has80=0; r="" }
+                    in_s && depth==sd && /listen[[:space:]]/ && /80/ { has80=1 }
+                    in_s && depth==sd && /^[[:space:]]*root[[:space:]]/ { r=$2; gsub(/;/,"",r) }
+                    /\}/ { if (in_s && depth==sd && has80 && r) { print r; exit }
+                           if (depth==sd) in_s=0; depth-- }
+                ' 2>/dev/null)
+            fi
         fi
         if [[ -z "$_detected_root" ]]; then
             for _ac in apache2ctl apachectl; do
@@ -265,6 +271,15 @@ stage_issue_cert() {
                 _detected_root=$("$_ac" -S 2>/dev/null | awk '/DocumentRoot/ {print $2; exit}')
                 [[ -n "$_detected_root" ]] && break
             done
+        fi
+        # Only trust an absolute path to an existing directory. Otherwise the
+        # detection misfired (a reverse-proxy server block with no 'root', or a
+        # label such as "DocumentRoot:") and we must NOT bake a bogus
+        # webroot_path into certbot's renewal config - it would silently break
+        # on the first renewal that actually needs an HTTP-01 fetch.
+        if [[ -n "$_detected_root" && ( "$_detected_root" != /* || ! -d "$_detected_root" ) ]]; then
+            cb_warn "Ignoring implausible auto-detected webroot: '$_detected_root'"
+            _detected_root=""
         fi
         if [[ -n "$_detected_root" ]]; then
             CB_CERTBOT_ONLY_WEBROOT="$_detected_root"
@@ -365,7 +380,7 @@ stage_issue_cert() {
         (( force_renew )) && args+=(--force-renewal)
     fi
 
-    cb_log "certbot ${args[*]}"
+    cb_log "certbot $(cb_redact_eab "${args[@]}")"
     if ! cb_retry "${CB_RETRY_COUNT:-3}" "${CB_RETRY_DELAY:-10}" cb_certbot_issue "$primary" "${args[@]}"; then
         cb_die "certbot failed for: ${VALID_DOMAINS[*]}"
     fi
@@ -420,9 +435,10 @@ main() {
     cb_log ""
     if [[ -z "$(find "$CB_HOOKS_DIR/post-issue.d" "$CB_HOOKS_DIR/renewed.d" -maxdepth 1 -type f -executable 2>/dev/null | head -1)" ]]; then
         cb_warn "No hooks in post-issue.d/ or renewed.d/ - cert sits in /etc/letsencrypt/ without further action."
-        cb_log "  Example for Jetty/Shibboleth:"
-        cb_log "    certberus hooks show   # show existing"
-        cb_log "    # Create a hook that converts and copies the cert where you need it."
+        cb_log "  To deploy it, add an executable script to renewed.d/ (and post-issue.d/"
+        cb_log "  for the first run); it receives \$CA_CERT_PATH, \$CA_KEY_PATH, \$CA_PRIMARY_DOMAIN."
+        cb_log "    certberus hooks list   # list hook dirs and bundled examples"
+        cb_log "    # e.g. copy \$CA_CERT_PATH and \$CA_KEY_PATH into your service, then reload it"
     fi
     cb_mark_installed "certbot-only"
 }

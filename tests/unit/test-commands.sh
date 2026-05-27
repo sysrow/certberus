@@ -235,6 +235,22 @@ echo "$OUT" | grep -qi 'interactive setup' \
     && _pass "'setup' dispatches to the install wizard" \
     || { _fail; echo "$OUT" | head -8; }
 
+echo "=== Test 33c: 'setup' does not die on an unbound variable (regression: CB_YES_CLI) ==="
+# Regression for the 0.2.11 bug: 'certberus setup' aborted at the first line of
+# cmd_install with 'CB_YES_CLI: unbound variable' under set -u — both with and
+# without -y. Test 33b did not catch it because the banner prints BEFORE that
+# line and the exit code was swallowed. Assert the crash signature is absent.
+OUT=$(timeout 30 "$CERTBERUS" --dry-run --webserver nginx --ca letsencrypt \
+        --email test@example.com setup --domain setup-regress.example.com </dev/null 2>&1 || true)
+echo "$OUT" | grep -qi 'unbound variable' \
+    && { _fail "setup crashed on unbound variable (no -y)"; echo "$OUT" | head -8; } \
+    || _pass "setup has no unbound-variable crash (no -y)"
+OUT=$(timeout 30 "$CERTBERUS" --dry-run --yes --webserver nginx --ca letsencrypt \
+        --email test@example.com setup --domain setup-regress.example.com </dev/null 2>&1 || true)
+echo "$OUT" | grep -qi 'unbound variable' \
+    && { _fail "setup crashed on unbound variable (with -y)"; echo "$OUT" | head -8; } \
+    || _pass "setup has no unbound-variable crash (with -y)"
+
 echo "=== Test 34: cb_apply_cli_set validates and exports ==="
 (
     source "$CERT_ROOT/lib/common.sh"
@@ -244,6 +260,43 @@ echo "=== Test 34: cb_apply_cli_set validates and exports ==="
     ( cb_apply_cli_set "PATH=/tmp" ) >/dev/null 2>&1 && exit 2
     exit 0
 ) && _pass "cb_apply_cli_set validates and exports" || _fail "cb_apply_cli_set problem"
+
+echo "=== Test 34b: cb_redact_eab masks the EAB HMAC for logging ==="
+(
+    source "$CERT_ROOT/lib/common.sh"
+    out=$(cb_redact_eab certonly --eab-kid VISIBLEKID --eab-hmac-key TOPSECRETHMAC -d a.example.com)
+    [[ "$out" == *"VISIBLEKID"* ]]              || exit 1   # KID stays visible
+    [[ "$out" != *"TOPSECRETHMAC"* ]]           || exit 2   # HMAC value gone
+    [[ "$out" == *"--eab-hmac-key <redacted>"* ]] || exit 3 # masked in place
+    # also the short --eab-hmac spelling
+    out2=$(cb_redact_eab --eab-hmac ANOTHERSECRET)
+    [[ "$out2" != *"ANOTHERSECRET"* ]]          || exit 4
+) && _pass "cb_redact_eab masks HMAC, keeps KID" || _fail "cb_redact_eab problem (rc above)"
+
+echo "=== Test 34c: cb_nginx_acme_webroot finds the ACME-challenge root ==="
+(
+    source "$CERT_ROOT/lib/common.sh"
+    # reverse-proxy one-liner location (the case that broke on vpn)
+    one=$(printf '%s\n' \
+        'server {' \
+        '    listen 80;' \
+        '    location /.well-known/acme-challenge/ { root /var/www/html; allow all; }' \
+        '    location / { return 301 https://$host$request_uri; }' \
+        '}' | cb_nginx_acme_webroot)
+    [[ "$one" == "/var/www/html" ]] || exit 1
+    # multi-line location block
+    multi=$(printf '%s\n' \
+        'server {' \
+        '    listen 80;' \
+        '    location ^~ /.well-known/acme-challenge/ {' \
+        '        root /srv/acme;' \
+        '    }' \
+        '}' | cb_nginx_acme_webroot)
+    [[ "$multi" == "/srv/acme" ]] || exit 2
+    # no acme-challenge location -> empty (do not invent a path)
+    none=$(printf '%s\n' 'server { listen 80; return 301 https://x; }' | cb_nginx_acme_webroot)
+    [[ -z "$none" ]] || exit 3
+) && _pass "cb_nginx_acme_webroot parses location root" || _fail "cb_nginx_acme_webroot problem (rc above)"
 
 echo "=== Test 35: modules show new CLI options ==="
 OUT=$(bash "$CERT_ROOT/webservers/nginx-certbot.sh" --help 2>&1)
@@ -321,6 +374,12 @@ echo "=== Test 49: certbot-only retry configuration ==="
 grep -q 'CB_RETRY_COUNT' "$CERT_ROOT/webservers/certbot-only.sh" && \
 grep -q 'CB_RETRY_DELAY' "$CERT_ROOT/webservers/certbot-only.sh" && \
     _pass "certbot-only uses CB_RETRY_COUNT/DELAY" || _fail "certbot-only ignores retry config"
+
+echo "=== Test 49b: issue-only is an accepted webserver value (alias of certbot-only) ==="
+OUT=$("$CERTBERUS" help 2>&1)
+echo "$OUT" | grep -q 'issue-only' && _pass "help mentions issue-only" || _fail "issue-only missing in help"
+OUT=$("$CERTBERUS" --webserver issue-only --dry-run help 2>&1)
+echo "$OUT" | grep -q 'Usage' && _pass "issue-only dispatch accepted" || _fail "issue-only dispatch rejected"
 
 echo
 echo "==============================="

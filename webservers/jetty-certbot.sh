@@ -432,7 +432,7 @@ stage_issue_cert() {
         fi
     fi
 
-    cb_log "certbot ${args[*]}"
+    cb_log "certbot $(cb_redact_eab "${args[@]}")"
     if ! cb_retry "${CB_RETRY_COUNT:-3}" "${CB_RETRY_DELAY:-10}" cb_certbot_issue "$primary" "${args[@]}"; then
         cb_die "certbot failed for: ${VALID_DOMAINS[*]}"
     fi

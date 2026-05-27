@@ -10,7 +10,7 @@
 #
 set -uo pipefail
 
-CB_VERSION="0.2.11"
+CB_VERSION="0.2.12"
 
 # Locate libraries.
 # Priority:
@@ -119,7 +119,9 @@ Usage: certberus [GLOBAL] COMMAND [ARGS]
   │  GLOBAL OPTIONS (usually not needed - use config.env)         │
   ╰───────────────────────────────────────────────────────────────╯
 
-  --webserver apache|nginx|tomcat|jetty|caddy|certbot-only|auto  (default: auto)
+  --webserver apache|nginx|tomcat|jetty|caddy|issue-only|auto  (default: auto)
+               issue-only = just obtain the cert (like plain certbot), deploy
+               to no service. (alias: certbot-only)
   --ca letsencrypt|harica|zerossl          (default: letsencrypt)
   --domain D (repeatable)      --email E
   --eab-kid KID    --eab-hmac HMAC    --acme-url URL
@@ -153,10 +155,10 @@ cb_detect_webserver() {
     if systemctl is-active --quiet nginx 2>/dev/null; then
         [[ -z "$active" ]] && active="nginx" || active="$active+nginx"
     fi
-    if systemctl list-units --state=active 2>/dev/null | grep -E '^\s*tomcat[0-9]*\.service'; then >/dev/null
+    if systemctl list-units --state=active 2>/dev/null | grep -qE '^\s*tomcat[0-9]*\.service'; then
         [[ -z "$active" ]] && active="tomcat" || active="$active+tomcat"
     fi
-    if systemctl list-units --state=active 2>/dev/null | grep -E '^\s*(jetty|shibboleth-idp)[0-9]*\.service'; then >/dev/null
+    if systemctl list-units --state=active 2>/dev/null | grep -qE '^\s*(jetty|shibboleth-idp)[0-9]*\.service'; then
         [[ -z "$active" ]] && active="jetty" || active="$active+jetty"
     fi
     if systemctl is-active --quiet caddy 2>/dev/null; then
@@ -173,7 +175,7 @@ cb_detect_webserver() {
 }
 
 # -------- Global flag parsing --------
-CB_CA_CLI=""; CB_WEBSERVER_CLI=""
+CB_CA_CLI=""; CB_WEBSERVER_CLI=""; CB_YES_CLI=""
 CLI_DOMAINS=""; CLI_EMAIL=""; CLI_EAB_KID=""; CLI_EAB_HMAC=""; CLI_ACME_URL=""
 CLI_WEBROOT=""; CLI_PORT80=""
 CLI_AUTO=0
@@ -218,7 +220,7 @@ parse_global() {
                 CLI_SET_ARGS+=("$1")
                 ;;
             -t|--staging) CB_STAGING=1 ;;
-            -y|--yes)     CB_ASSUME_YES=1 ;;
+            -y|--yes)     CB_ASSUME_YES=1; CB_YES_CLI=1 ;;
             -n|--dry-run) CB_DRY_RUN=1 ;;
             -v|--verbose) CB_VERBOSE=1 ;;
             --auto)  CLI_AUTO=1 ;;
@@ -260,7 +262,7 @@ build_forward_args() {
     [[ -n "$CLI_ACME_URL" ]] && out+=(--acme-url "$CLI_ACME_URL")
     if [[ -n "$CLI_WEBROOT" ]]; then
         case "$target_ws" in
-            nginx|tomcat|jetty|certbot-only) out+=(--webroot "$CLI_WEBROOT") ;;
+            nginx|tomcat|jetty|certbot-only|issue-only) out+=(--webroot "$CLI_WEBROOT") ;;
             apache) cb_warn "--webroot has no effect for Apache mod_md (mod_md manages the challenge itself)." ;;
             caddy) cb_warn "--webroot has no effect for Caddy (Caddy manages the challenge itself)." ;;
         esac
@@ -569,7 +571,7 @@ cmd_install() {
                 tomcat)       _ws_def=3 ;;
                 jetty)        _ws_def=4 ;;
                 caddy)        _ws_def=5 ;;
-                certbot-only) _ws_def=6 ;;
+                issue-only|certbot-only) _ws_def=6 ;;
             esac
             echo
             echo "Which webserver do you want to set up?"
@@ -578,7 +580,7 @@ cmd_install() {
             echo "  3) Tomcat  (certbot + PEM connector, 9+)"
             echo "  4) Jetty   (certbot + PKCS12 keystore)"
             echo "  5) Caddy   (native ACME — zero-config TLS)"
-            echo "  6) certbot-only  (HAProxy, Postfix, ...)"
+            echo "  6) issue-only    (just get the cert, deploy to no service - like plain certbot)"
             echo "  7) Exit"
             local choice
             read -r -p "Choice [$_ws_def]: " choice </dev/tty
@@ -589,7 +591,7 @@ cmd_install() {
                 3) ws="tomcat" ;;
                 4) ws="jetty" ;;
                 5) ws="caddy" ;;
-                6) ws="certbot-only" ;;
+                6) ws="issue-only" ;;
                 *) exit 0 ;;
             esac
         fi
@@ -674,7 +676,7 @@ cmd_issue() {
     if [[ "$ws" == "auto" ]]; then
         local d; d=$(cb_detect_webserver)
         if [[ "$d" == *+* ]]; then
-            cb_die "Multiple webservers detected ($d). Choose one: --webserver apache|nginx|tomcat|jetty|caddy (or CB_WEBSERVER in config.env)."
+            cb_die "Multiple webservers detected ($d). Choose one: --webserver apache|nginx|tomcat|jetty|caddy|issue-only (or set CB_WEBSERVER in config.env). Use issue-only to just obtain the cert without touching any webserver."
         fi
         case "$d" in
             *apache*) ws="apache" ;;
@@ -779,7 +781,7 @@ cmd_issue_webserver() {
         tomcat) script="$CB_WEBSERVERS_DIR/tomcat-certbot.sh" ;;
         jetty)  script="$CB_WEBSERVERS_DIR/jetty-certbot.sh" ;;
         caddy)  script="$CB_WEBSERVERS_DIR/caddy.sh" ;;
-        certbot-only) script="$CB_WEBSERVERS_DIR/certbot-only.sh" ;;
+        issue-only|certbot-only) script="$CB_WEBSERVERS_DIR/certbot-only.sh" ;;
         *) cb_die "Unknown webserver: $ws" ;;
     esac
     [[ -x "$script" ]] || cb_die "Script not found: $script"
