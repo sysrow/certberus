@@ -1,0 +1,27 @@
+name: Self-hosted lint
+
+# Manual trigger only. This repo has no build step; it runs shellcheck (errors
+# only) on the self-hosted runner (tristram). shellcheck is fetched as a static
+# binary because the runner cannot install system packages.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    runs-on: [self-hosted, tristram]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch shellcheck (static binary)
+        run: |
+          ver=v0.10.0
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${ver}/shellcheck-${ver}.linux.x86_64.tar.xz" -o sc.tar.xz
+          tar -xJf sc.tar.xz
+          echo "${PWD}/shellcheck-${ver}" >> "$GITHUB_PATH"
+      - name: Run shellcheck (errors only)
+        run: |
+          mapfile -t files < <(find . -type f -name '*.sh' -not -path './.git/*')
+          if [ "${#files[@]}" -eq 0 ]; then echo "no shell scripts"; exit 0; fi
+          shellcheck -S error "${files[@]}"
